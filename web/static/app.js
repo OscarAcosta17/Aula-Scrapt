@@ -181,6 +181,34 @@ async function saveManualCookie() {
     }
 }
 
+async function saveManualToken() {
+    const input = document.getElementById('token-input');
+    const val = input.value.trim();
+    if (!val) {
+        showBanner('Ingresa un token de acceso válido.', 'error');
+        return;
+    }
+
+    try {
+        const res = await fetch('/api/login/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token_value: val })
+        });
+        const data = await res.json();
+        updateSessionUI(data);
+        toggleModal('token-modal');
+        if (data.authenticated) {
+            showBanner(`Token verificado para ${data.user_name}. Cargando cursos...`, 'success');
+            await scanAula();
+        } else {
+            showBanner(`Token inválido: ${data.reason}`, 'error');
+        }
+    } catch (e) {
+        showBanner(`Error: ${e.message}`, 'error');
+    }
+}
+
 async function logoutSession() {
     await fetch('/api/logout', { method: 'POST' });
     lastScanData = null;

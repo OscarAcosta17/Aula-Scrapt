@@ -28,6 +28,7 @@ from config import (
 from scraper.auth import (
     clear_session,
     launch_interactive_browser_login,
+    save_access_token,
     save_manual_cookie,
     verify_session,
 )
@@ -94,6 +95,10 @@ def _open_native_folder_dialog(initial_dir: str) -> Optional[str]:
 
 class CookieInput(BaseModel):
     cookie_value: str
+
+
+class TokenInput(BaseModel):
+    token_value: str
 
 
 class SettingsUpdateRequest(BaseModel):
@@ -201,6 +206,15 @@ async def api_login_cookie(payload: CookieInput):
             status_code=400, detail="El valor de la cookie no puede estar vacío."
         )
     return await asyncio.to_thread(save_manual_cookie, payload.cookie_value)
+
+
+@app.post("/api/login/token")
+async def api_login_token(payload: TokenInput):
+    if not payload.token_value.strip():
+        raise HTTPException(
+            status_code=400, detail="El token de acceso no puede estar vacío."
+        )
+    return await asyncio.to_thread(save_access_token, payload.token_value)
 
 
 @app.post("/api/logout")
@@ -409,16 +423,58 @@ if __name__ == "__main__":
     local_ip = get_local_ip()
     print_startup_banner(local_ip, port)
 
-    # Abrir navegador automáticamente tras 1 segundo
-    import threading
-    import webbrowser
-    def open_browser():
-        import time
-        time.sleep(1.2)
-        try:
-            webbrowser.open(f"http://localhost:{port}")
-        except Exception:
-            pass
+    use_browser_only = "--browser" in sys.argv or "--no-gui" in sys.argv
+    has_webview = False
 
-    threading.Thread(target=open_browser, daemon=True).start()
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    if not use_browser_only:
+        try:
+            import webview
+            has_webview = True
+        except ImportError:
+            has_webview = False
+
+    if has_webview:
+        import threading
+        import time
+        import urllib.request
+
+        def run_server():
+            uvicorn.run(app, host="0.0.0.0", port=port, log_level="warning")
+
+        server_thread = threading.Thread(target=run_server, daemon=True)
+        server_thread.start()
+
+        # Esperar brevemente a que uvicorn levante
+        for _ in range(40):
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/api/settings", timeout=0.5)
+                break
+            except Exception:
+                time.sleep(0.1)
+
+        # Crear y abrir ventana nativa de escritorio
+        webview.create_window(
+            title="Aula-Scrapt USM",
+            url=f"http://127.0.0.1:{port}",
+            width=1280,
+            height=820,
+            min_size=(800, 600),
+            background_color="#0d1117",
+        )
+        webview.start()
+        sys.exit(0)
+    else:
+        # Modo estándar con apertura de navegador predeterminado
+        import threading
+        import webbrowser
+
+        def open_browser():
+            import time
+            time.sleep(1.2)
+            try:
+                webbrowser.open(f"http://localhost:{port}")
+            except Exception:
+                pass
+
+        threading.Thread(target=open_browser, daemon=True).start()
+        uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")

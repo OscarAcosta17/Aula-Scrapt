@@ -42,6 +42,9 @@ def build():
         "--hidden-import=PIL",
         "--hidden-import=tkinter",
         "--hidden-import=tkinter.filedialog",
+        "--collect-all=webview",
+        "--collect-all=pythonnet",
+        "--collect-all=clr_loader",
     ]
 
     print("Ejecutando PyInstaller...")

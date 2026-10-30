@@ -24,6 +24,9 @@
                 <button id="btn-browser-login" class="btn btn-outline btn-sm" onclick="startBrowserLogin()">
                     Iniciar sesion
                 </button>
+                <button class="btn btn-outline btn-sm" onclick="toggleModal('token-modal')">
+                    Token
+                </button>
                 <button class="btn btn-outline btn-sm" onclick="toggleModal('cookie-modal')">
                     Cookie
                 </button>
@@ -138,6 +141,24 @@
                     <img src="data:image/png;base64,{{ qr_b64 }}" alt="QR" />
                 </div>
                 <p class="url-text"><a href="{{ mobile_url }}" target="_blank">{{ mobile_url }}</a></p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Token de Acceso (wstoken) -->
+    <div id="token-modal" class="modal-backdrop hidden" onclick="closeModalOnBackdrop(event, 'token-modal')">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>Token de Acceso (wstoken)</h3>
+                <button class="close-btn" onclick="toggleModal('token-modal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted">Obtenlo en <strong>Aula USM &gt; Perfil &gt; Preferencias &gt; Claves de seguridad</strong>:</p>
+                <input type="text" id="token-input" class="text-input" placeholder="Pega tu token de Moodle aqui" />
+                <div class="modal-footer">
+                    <button class="btn btn-outline" onclick="toggleModal('token-modal')">Cancelar</button>
+                    <button class="btn btn-primary" onclick="saveManualToken()">Conectar con Token</button>
+                </div>
             </div>
         </div>
     </div>

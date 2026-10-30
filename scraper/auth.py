@@ -27,12 +27,13 @@ def load_saved_session() -> Optional[Dict]:
 
 
 def save_session_data(
-    cookies: Dict[str, str], sesskey: str = "", user_name: str = "", user_id: int = 0
+    cookies: Dict[str, str], sesskey: str = "", user_name: str = "", user_id: int = 0, token: str = ""
 ) -> Dict:
-    """Guarda las cookies de sesión en el archivo local privado."""
+    """Guarda las cookies o token de sesión en el archivo local privado."""
     data = {
-        "cookies": cookies,
+        "cookies": cookies or {},
         "sesskey": sesskey,
+        "token": token,
         "user_name": user_name,
         "user_id": user_id,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
@@ -123,12 +124,45 @@ def extract_session_details(html: str) -> Tuple[Optional[str], Optional[str], in
 
 def verify_session() -> Dict:
     """
-    Verifica en vivo contra aula.usm.cl/my/courses.php si la sesión guardada es realmente válida.
-    Si redirige a /portada/index.php o /login/, limpia la sesión falsa y reporta No Autenticado.
+    Verifica en vivo si la sesión activa es válida, ya sea por wstoken o por cookies.
     """
-    req_session = get_requests_session()
     saved = load_saved_session()
-    if not req_session or not saved:
+    if not saved:
+        return {"authenticated": False, "reason": "Sin sesión activa."}
+
+    # 1. Verificación por wstoken si existe
+    if saved.get("token"):
+        ws_url = f"{AULA_BASE_URL}/webservice/rest/server.php"
+        params = {
+            "wstoken": saved["token"],
+            "wsfunction": "core_webservice_get_site_info",
+            "moodlewsrestformat": "json",
+        }
+        try:
+            resp = requests.post(ws_url, data=params, headers={"User-Agent": USER_AGENT}, timeout=12)
+            data = resp.json()
+            if "errorcode" not in data and "userid" in data:
+                return {
+                    "authenticated": True,
+                    "user_name": data.get("fullname", saved.get("user_name")),
+                    "user_id": data.get("userid", saved.get("user_id")),
+                    "token_type": "wstoken",
+                    "updated_at": saved.get("updated_at"),
+                }
+            else:
+                clear_session()
+                return {"authenticated": False, "reason": "Token de acceso expirado o inválido."}
+        except Exception:
+            return {
+                "authenticated": True,
+                "user_name": saved.get("user_name"),
+                "user_id": saved.get("user_id"),
+                "token_type": "wstoken",
+            }
+
+    # 2. Verificación por cookies contra aula.usm.cl/my/courses.php
+    req_session = get_requests_session()
+    if not req_session or not saved.get("cookies"):
         return {"authenticated": False, "reason": "Sin sesión activa."}
 
     try:
@@ -162,6 +196,44 @@ def verify_session() -> Dict:
         }
     except Exception as e:
         return {"authenticated": False, "reason": f"Error de conexión: {str(e)}"}
+
+
+def save_access_token(token_value: str) -> Dict:
+    """Valida y almacena un token de acceso (wstoken) de Moodle."""
+    clean_val = token_value.strip()
+    if not clean_val:
+        return {"authenticated": False, "reason": "El token de acceso no puede estar vacío."}
+
+    ws_url = f"{AULA_BASE_URL}/webservice/rest/server.php"
+    params = {
+        "wstoken": clean_val,
+        "wsfunction": "core_webservice_get_site_info",
+        "moodlewsrestformat": "json",
+    }
+    try:
+        resp = requests.post(ws_url, data=params, headers={"User-Agent": USER_AGENT}, timeout=12)
+        data = resp.json()
+        if "errorcode" in data:
+            return {"authenticated": False, "reason": f"Token inválido: {data.get('message', data.get('errorcode'))}"}
+
+        user_name = data.get("fullname", data.get("username", "Usuario"))
+        user_id = data.get("userid", 0)
+        updated = save_session_data(
+            cookies={},
+            sesskey="",
+            user_name=user_name,
+            user_id=user_id,
+            token=clean_val,
+        )
+        return {
+            "authenticated": True,
+            "user_name": updated["user_name"],
+            "user_id": updated["user_id"],
+            "token_type": "wstoken",
+            "updated_at": updated["updated_at"],
+        }
+    except Exception as e:
+        return {"authenticated": False, "reason": f"Error de validación: {str(e)}"}
 
 
 def save_manual_cookie(moodle_session_value: str) -> Dict:
