@@ -15,8 +15,15 @@ from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 from pydantic import BaseModel
 
-if hasattr(sys.stdout, "reconfigure"):
+if sys.stdout is None:
+    sys.stdout = io.StringIO()
+elif hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
+if sys.stderr is None:
+    sys.stderr = io.StringIO()
+elif hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from config import (
     BASE_DIR,
@@ -453,6 +460,7 @@ if __name__ == "__main__":
                 time.sleep(0.1)
 
         # Crear y abrir ventana nativa de escritorio
+        icon_path = str(BASE_DIR / "icon.ico") if (BASE_DIR / "icon.ico").exists() else None
         webview.create_window(
             title="Aula-Scrapt USM",
             url=f"http://127.0.0.1:{port}",
@@ -461,7 +469,7 @@ if __name__ == "__main__":
             min_size=(800, 600),
             background_color="#0d1117",
         )
-        webview.start()
+        webview.start(icon=icon_path)
         sys.exit(0)
     else:
         # Modo estándar con apertura de navegador predeterminado

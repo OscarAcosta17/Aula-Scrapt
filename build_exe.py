@@ -20,6 +20,7 @@ def build():
         "--name=Aula-Scrapt",
         f"--icon={BASE_DIR / 'icon.ico'}",
         "--onedir",
+        "--windowed",
         "--noconfirm",
         "--clean",
         f"--add-data={BASE_DIR / 'web' / 'templates'};web/templates",
@@ -52,6 +53,8 @@ def build():
 
     output_folder = dist_dir / "Aula-Scrapt"
     if output_folder.exists():
+        if (BASE_DIR / "icon.ico").exists():
+            shutil.copy(BASE_DIR / "icon.ico", output_folder / "icon.ico")
         print("\n" + "=" * 60)
         print(" Compilacion exitosa!")
         print(f" Carpeta del programa: {output_folder}")
