@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aula-Scrapt USM</title>
+    <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="app-shell">
+        <!-- Barra superior compacta -->
+        <header class="topbar">
+            <div class="brand">
+                <img src="/static/logo.svg" alt="Aula-Scrapt Logo" class="brand-logo" />
+                <h1>Aula-Scrapt</h1>
+                <div id="session-badge" class="status-pill status-checking">
+                    <span class="dot"></span>
+                    <span id="session-text">Verificando...</span>
+                </div>
+            </div>
+
+            <div class="topbar-actions">
+                <button id="btn-browser-login" class="btn btn-outline btn-sm" onclick="startBrowserLogin()">
+                    Iniciar sesion
+                </button>
+                <button class="btn btn-outline btn-sm" onclick="toggleModal('cookie-modal')">
+                    Cookie
+                </button>
+                <button id="btn-logout" class="btn btn-danger btn-sm hidden" onclick="logoutSession()">
+                    Salir
+                </button>
+                <button class="btn btn-outline btn-sm" onclick="toggleModal('qr-modal')">
+                    Movil (QR)
+                </button>
+                <button class="btn btn-outline btn-sm" onclick="shutdownApp()" title="Cerrar la aplicacion">
+                    Cerrar app
+                </button>
+            </div>
+        </header>
+
+        <!-- Barra de configuracion de carpeta y controles -->
+        <section class="control-bar">
+            <div class="path-selector">
+                <label for="input-download-root" class="control-label">Guardar en:</label>
+                <input
+                    type="text"
+                    id="input-download-root"
+                    class="path-input"
+                    value="{{ download_root }}"
+                    placeholder="Ruta donde se guardaran los archivos"
+                    onchange="saveDownloadRootManual()"
+                />
+                <button class="btn btn-outline btn-sm" onclick="pickNativeFolder()">
+                    Elegir carpeta...
+                </button>
+            </div>
+
+            <div class="scan-controls">
+                <div id="scan-toolbar" class="toolbar-inline hidden">
+                    <span class="stat-text">
+                        <strong id="stat-courses">0</strong> ramos |
+                        <strong id="stat-total">0</strong> archivos (<strong id="stat-new">0</strong> pendientes)
+                    </span>
+                    <div class="filter-tabs">
+                        <button class="tab-btn active" data-filter="files" onclick="setFilter('files')">
+                            Archivos
+                        </button>
+                        <button class="tab-btn" data-filter="new" onclick="setFilter('new')">
+                            No descargados
+                        </button>
+                        <button class="tab-btn" data-filter="all" onclick="setFilter('all')">
+                            Todo
+                        </button>
+                    </div>
+                    <button class="btn btn-outline btn-xs" onclick="selectAllNew()">Marcar pendientes</button>
+                    <button class="btn btn-outline btn-xs" onclick="clearSelection()">Limpiar</button>
+                </div>
+
+                <button id="btn-scan" class="btn btn-primary btn-sm" onclick="scanAula()">
+                    Actualizar cursos
+                </button>
+            </div>
+        </section>
+
+        <!-- Mensaje de estado compacto -->
+        <div id="status-banner" class="status-banner hidden"></div>
+
+        <!-- Area principal sin scroll infinito de pagina -->
+        <main class="workspace">
+            <datalist id="existing-folders-list"></datalist>
+            <div id="courses-container" class="courses-accordion">
+                <div class="empty-state">
+                    <p>Presiona <strong>"Actualizar cursos"</strong> o inicia sesion para cargar tus asignaturas.</p>
+                </div>
+            </div>
+        </main>
+
+        <!-- Barra fija inferior de descarga con progreso en tiempo real -->
+        <footer id="download-bar" class="download-bar hidden">
+            <div class="download-bar-inner">
+                <div class="download-info">
+                    <span id="download-status-label">
+                        <strong id="selected-count">0</strong> archivo(s) seleccionado(s)
+                        <span id="selected-size-wrapper" class="hidden">• <strong id="selected-size">0 MB</strong></span>
+                    </span>
+                    <span id="download-current-file" class="current-file-text hidden"></span>
+                </div>
+                <div class="download-actions">
+                    <button id="btn-download-selected" class="btn btn-primary" onclick="downloadSelected()">
+                        Descargar seleccionados
+                    </button>
+                </div>
+            </div>
+            <!-- Barra de progreso fluida -->
+            <div id="download-progress-box" class="progress-box hidden">
+                <div class="progress-bar-track">
+                    <div id="download-progress-bar" class="progress-bar-fill" style="width: 0%;"></div>
+                </div>
+                <div class="progress-meta">
+                    <span id="progress-percent-text">0%</span>
+                    <span id="progress-details-text">Iniciando descarga...</span>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Modal QR -->
+    <div id="qr-modal" class="modal-backdrop hidden" onclick="closeModalOnBackdrop(event, 'qr-modal')">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>Acceso en Telefono</h3>
+                <button class="close-btn" onclick="toggleModal('qr-modal')">&times;</button>
+            </div>
+            <div class="modal-body center">
+                <p class="muted">Escanea este codigo conectado a la misma red Wi-Fi:</p>
+                <div class="qr-wrapper">
+                    <img src="data:image/png;base64,{{ qr_b64 }}" alt="QR" />
+                </div>
+                <p class="url-text"><a href="{{ mobile_url }}" target="_blank">{{ mobile_url }}</a></p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Cookie -->
+    <div id="cookie-modal" class="modal-backdrop hidden" onclick="closeModalOnBackdrop(event, 'cookie-modal')">
+        <div class="modal-card">
+            <div class="modal-header">
+                <h3>Cookie MoodleSession</h3>
+                <button class="close-btn" onclick="toggleModal('cookie-modal')">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p class="muted">Pega el valor de la cookie <code>MoodleSession</code> de <code>aula.usm.cl</code>:</p>
+                <input type="text" id="cookie-input" class="text-input" placeholder="Valor de MoodleSession" />
+                <div class="modal-footer">
+                    <button class="btn btn-outline" onclick="toggleModal('cookie-modal')">Cancelar</button>
+                    <button class="btn btn-primary" onclick="saveManualCookie()">Verificar y guardar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

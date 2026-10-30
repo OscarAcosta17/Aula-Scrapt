@@ -1,0 +1,23 @@
+# Datos privados de sesión y caché local (NUNCA subir a GitHub)
+data/
+*.session
+session.json
+cookies.json
+.env
+
+# Entornos virtuales y caché de Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+
+# Compilación PyInstaller
+build/
+dist/
+*.spec
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
