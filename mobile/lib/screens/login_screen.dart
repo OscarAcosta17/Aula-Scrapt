@@ -1,32 +1,67 @@
 import 'package:flutter/material.dart';
-import 'package:webview_flutter/webview_flutter.dart';
 import '../services/moodle_service.dart';
+import '../services/settings_service.dart';
+import 'auth_sheets.dart';
 import 'courses_screen.dart';
 
 class LoginScreen extends StatefulWidget {
   final MoodleService moodleService;
+  final SettingsService settingsService;
 
-  const LoginScreen({super.key, required this.moodleService});
+  const LoginScreen({
+    super.key,
+    required this.moodleService,
+    required this.settingsService,
+  });
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
 }
 
 class _LoginScreenState extends State<LoginScreen> {
-  final _tokenController = TextEditingController();
+  int _selectedMode = 0; // 0 = WebView, 1 = Token, 2 = Cookie
+  final _inputController = TextEditingController();
   bool _isLoading = false;
   String? _errorMessage;
 
   @override
   void dispose() {
-    _tokenController.dispose();
+    _inputController.dispose();
     super.dispose();
   }
 
-  Future<void> _loginWithToken() async {
-    final token = _tokenController.text.trim();
-    if (token.isEmpty) {
-      setState(() => _errorMessage = 'Ingresa un token de acceso válido.');
+  void _goToCourses() {
+    if (!mounted) return;
+    Navigator.of(context).pushReplacement(
+      MaterialPageRoute(
+        builder: (_) => CoursesScreen(
+          moodleService: widget.moodleService,
+          settingsService: widget.settingsService,
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openWebViewLogin() async {
+    final ok = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => WebViewLoginScreen(
+          moodleService: widget.moodleService,
+          clearExistingCookies: false,
+        ),
+      ),
+    );
+    if (ok == true) {
+      _goToCourses();
+    }
+  }
+
+  Future<void> _submitCredential() async {
+    final val = _inputController.text.trim();
+    if (val.isEmpty) {
+      setState(() => _errorMessage = _selectedMode == 1
+          ? 'Ingresa un token de acceso válido.'
+          : 'Ingresa el valor de la cookie MoodleSession.');
       return;
     }
 
@@ -35,256 +70,261 @@ class _LoginScreenState extends State<LoginScreen> {
       _errorMessage = null;
     });
 
-    final res = await widget.moodleService.loginWithToken(token);
+    final res = _selectedMode == 1
+        ? await widget.moodleService.loginWithToken(val)
+        : await widget.moodleService.loginWithCookie(val);
+
+    if (!mounted) return;
     setState(() => _isLoading = false);
 
-    if (res['success'] == true && mounted) {
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(
-          builder: (_) => CoursesScreen(moodleService: widget.moodleService),
-        ),
-      );
+    if (res['success'] == true) {
+      _goToCourses();
     } else {
-      setState(() => _errorMessage = res['message'] ?? 'Error desconocido');
+      setState(() => _errorMessage = res['message']?.toString() ?? 'Error al autenticar');
     }
-  }
-
-  void _openWebViewLogin() {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) => _WebViewLoginScreen(
-          moodleService: widget.moodleService,
-          onSuccess: () {
-            Navigator.of(context).pop();
-            Navigator.of(context).pushReplacement(
-              MaterialPageRoute(
-                builder: (_) =>
-                    CoursesScreen(moodleService: widget.moodleService),
-              ),
-            );
-          },
-        ),
-      ),
-    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0D1117),
+      backgroundColor: const Color(0xFF0F0F12),
       body: SafeArea(
         child: Center(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.symmetric(horizontal: 28.0),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                // Logo
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(20),
-                  child: Image.asset(
-                    'assets/logo.png',
-                    width: 80,
-                    height: 80,
-                    errorBuilder: (_, __, ___) => Container(
-                      width: 80,
-                      height: 80,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF161B22),
-                        borderRadius: BorderRadius.circular(20),
-                        border: Border.all(color: const Color(0xFF30363D)),
-                      ),
-                      child: const Icon(
-                        Icons.school,
-                        color: Color(0xFF38BDF8),
-                        size: 40,
+            padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 440),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Center(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(18),
+                      child: Image.asset(
+                        'assets/logo.png',
+                        width: 74,
+                        height: 74,
+                        errorBuilder: (_, _, _) => Container(
+                          width: 74,
+                          height: 74,
+                          color: const Color(0xFF17171C),
+                          child: const Icon(Icons.layers, color: Color(0xFF38BDF8), size: 38),
+                        ),
                       ),
                     ),
                   ),
-                ),
-                const SizedBox(height: 20),
-                const Text(
-                  'Aula-Scrapt Mobile',
-                  style: TextStyle(
-                    fontSize: 22,
-                    fontWeight: FontWeight.bold,
-                    color: Color(0xFFF0F6FC),
-                    letterSpacing: -0.5,
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Aula-Scrapt USM',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w700,
+                      color: Color(0xFFF3F4F6),
+                      letterSpacing: -0.3,
+                    ),
                   ),
-                ),
-                const SizedBox(height: 6),
-                const Text(
-                  'Descarga sincronizada y notas Obsidian para Aula USM',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 13, color: Color(0xFF8B949E)),
-                ),
-                const SizedBox(height: 32),
+                  const SizedBox(height: 6),
+                  const Text(
+                    'Sincroniza archivos y grafos Obsidian (.md) directamente en tu dispositivo.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 13, color: Color(0xFF9CA3AF)),
+                  ),
+                  const SizedBox(height: 24),
 
-                // Tarjeta de Token
-                Container(
-                  padding: const EdgeInsets.all(20),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF161B22),
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: const Color(0xFF30363D)),
-                  ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      const Row(
-                        children: [
-                          Icon(Icons.key, size: 18, color: Color(0xFF38BDF8)),
-                          SizedBox(width: 8),
-                          Text(
-                            'Token de Acceso Moodle (Recomendado)',
-                            style: TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: Color(0xFFF0F6FC),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      const Text(
-                        'Ingresa tu wstoken de la app móvil oficial de Aula USM para sincronización directa.',
-                        style: TextStyle(
-                          fontSize: 12,
-                          color: Color(0xFF8B949E),
-                          height: 1.4,
+                  // Selector de los 3 métodos de acceso (paridad .exe)
+                  Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF17171C),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: const Color(0xFF2A2A33)),
+                    ),
+                    child: Row(
+                      children: [
+                        _AuthTabButton(
+                          label: 'Navegador',
+                          selected: _selectedMode == 0,
+                          onTap: () => setState(() {
+                            _selectedMode = 0;
+                            _errorMessage = null;
+                          }),
                         ),
-                      ),
-                      const SizedBox(height: 16),
-                      TextField(
-                        controller: _tokenController,
-                        style: const TextStyle(
-                          color: Color(0xFFF0F6FC),
-                          fontSize: 14,
-                          fontFamily: 'monospace',
+                        _AuthTabButton(
+                          label: 'Token',
+                          selected: _selectedMode == 1,
+                          onTap: () => setState(() {
+                            _selectedMode = 1;
+                            _errorMessage = null;
+                            _inputController.clear();
+                          }),
                         ),
-                        decoration: InputDecoration(
-                          hintText: 'Ej: 7a8b9c0d1e2f3a4b...',
-                          hintStyle: const TextStyle(color: Color(0xFF484F58)),
-                          filled: true,
-                          fillColor: const Color(0xFF0D1117),
-                          contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 14,
-                            vertical: 12,
-                          ),
-                          border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(8),
-                            borderSide: const BorderSide(
-                              color: Color(0xFF30363D),
-                            ),
-                          ),
-                          enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(8),
-                            borderSide: const BorderSide(
-                              color: Color(0xFF30363D),
-                            ),
-                          ),
-                          focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(8),
-                            borderSide: const BorderSide(
-                              color: Color(0xFF38BDF8),
-                            ),
-                          ),
-                        ),
-                      ),
-                      if (_errorMessage != null) ...[
-                        const SizedBox(height: 12),
-                        Container(
-                          padding: const EdgeInsets.all(10),
-                          decoration: BoxDecoration(
-                            color: const Color(0x26F85149),
-                            borderRadius: BorderRadius.circular(6),
-                            border: Border.all(color: const Color(0xFFF85149)),
-                          ),
-                          child: Text(
-                            _errorMessage!,
-                            style: const TextStyle(
-                              color: Color(0xFFF85149),
-                              fontSize: 12,
-                            ),
-                          ),
+                        _AuthTabButton(
+                          label: 'Cookie',
+                          selected: _selectedMode == 2,
+                          onTap: () => setState(() {
+                            _selectedMode = 2;
+                            _errorMessage = null;
+                            _inputController.clear();
+                          }),
                         ),
                       ],
-                      const SizedBox(height: 16),
-                      ElevatedButton(
-                        onPressed: _isLoading ? null : _loginWithToken,
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF238636),
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                        ),
-                        child: _isLoading
-                            ? const SizedBox(
-                                width: 18,
-                                height: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+
+                  // Tarjeta activa según método elegido
+                  Container(
+                    padding: const EdgeInsets.all(18),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF17171C),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: const Color(0xFF2A2A33)),
+                    ),
+                    child: _selectedMode == 0
+                        ? Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              const Text(
+                                'Inicio de sesión interactivo (Microsoft 365)',
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFFF3F4F6),
                                 ),
-                              )
-                            : const Text(
-                                'Conectar con Token',
-                                style: TextStyle(fontWeight: FontWeight.w600),
                               ),
-                      ),
-                    ],
+                              const SizedBox(height: 8),
+                              const Text(
+                                'Se abrirá Aula USM dentro de la app para ingresar con tu cuenta institucional USM y verificación en 2 pasos.',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Color(0xFF9CA3AF),
+                                  height: 1.45,
+                                ),
+                              ),
+                              const SizedBox(height: 18),
+                              ElevatedButton.icon(
+                                onPressed: _openWebViewLogin,
+                                icon: const Icon(Icons.login, size: 18),
+                                label: const Text(
+                                  'Iniciar sesión en Aula USM',
+                                  style: TextStyle(fontWeight: FontWeight.w600),
+                                ),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: const Color(0xFFF3F4F6),
+                                  foregroundColor: const Color(0xFF0F0F12),
+                                  padding: const EdgeInsets.symmetric(vertical: 13),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(7),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          )
+                        : Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              Text(
+                                _selectedMode == 1
+                                    ? 'Token de Acceso (wstoken)'
+                                    : 'Cookie MoodleSession',
+                                style: const TextStyle(
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w600,
+                                  color: Color(0xFFF3F4F6),
+                                ),
+                              ),
+                              const SizedBox(height: 8),
+                              Text(
+                                _selectedMode == 1
+                                    ? 'Obtenlo en Aula USM > Perfil > Preferencias > Claves de seguridad.'
+                                    : 'Pega el valor de la cookie MoodleSession activa de aula.usm.cl.',
+                                style: const TextStyle(
+                                  fontSize: 12,
+                                  color: Color(0xFF9CA3AF),
+                                  height: 1.45,
+                                ),
+                              ),
+                              const SizedBox(height: 14),
+                              TextField(
+                                controller: _inputController,
+                                style: const TextStyle(
+                                  color: Color(0xFFF3F4F6),
+                                  fontSize: 13,
+                                  fontFamily: 'monospace',
+                                ),
+                                decoration: InputDecoration(
+                                  hintText: _selectedMode == 1
+                                      ? 'Ej: 7a8b9c0d1e2f3a4b...'
+                                      : 'Valor de MoodleSession',
+                                  hintStyle: const TextStyle(color: Color(0xFF6B7280)),
+                                  filled: true,
+                                  fillColor: const Color(0xFF0F0F12),
+                                  contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 12,
+                                    vertical: 11,
+                                  ),
+                                  border: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(7),
+                                    borderSide: const BorderSide(color: Color(0xFF2A2A33)),
+                                  ),
+                                  enabledBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(7),
+                                    borderSide: const BorderSide(color: Color(0xFF2A2A33)),
+                                  ),
+                                  focusedBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(7),
+                                    borderSide: const BorderSide(color: Color(0xFF38BDF8)),
+                                  ),
+                                ),
+                              ),
+                              if (_errorMessage != null) ...[
+                                const SizedBox(height: 10),
+                                Text(
+                                  _errorMessage!,
+                                  style: const TextStyle(color: Color(0xFFF87171), fontSize: 12),
+                                ),
+                              ],
+                              const SizedBox(height: 16),
+                              ElevatedButton(
+                                onPressed: _isLoading ? null : _submitCredential,
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: const Color(0xFFF3F4F6),
+                                  foregroundColor: const Color(0xFF0F0F12),
+                                  padding: const EdgeInsets.symmetric(vertical: 13),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(7),
+                                  ),
+                                ),
+                                child: _isLoading
+                                    ? const SizedBox(
+                                        width: 18,
+                                        height: 18,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          color: Color(0xFF0F0F12),
+                                        ),
+                                      )
+                                    : Text(
+                                        _selectedMode == 1
+                                            ? 'Conectar con Token'
+                                            : 'Verificar y guardar Cookie',
+                                        style: const TextStyle(fontWeight: FontWeight.w600),
+                                      ),
+                              ),
+                            ],
+                          ),
                   ),
-                ),
 
-                const SizedBox(height: 20),
-                const Row(
-                  children: [
-                    Expanded(child: Divider(color: Color(0xFF30363D))),
-                    Padding(
-                      padding: EdgeInsets.symmetric(horizontal: 14),
-                      child: Text(
-                        'o ingresa mediante navegador',
-                        style: TextStyle(
-                          color: Color(0xFF8B949E),
-                          fontSize: 12,
-                        ),
-                      ),
-                    ),
-                    Expanded(child: Divider(color: Color(0xFF30363D))),
-                  ],
-                ),
-                const SizedBox(height: 20),
-
-                // Opción 2: Login con WebView (Microsoft 365)
-                OutlinedButton.icon(
-                  onPressed: _openWebViewLogin,
-                  icon: const Icon(
-                    Icons.open_in_browser,
-                    size: 18,
-                    color: Color(0xFF58A6FF),
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Tu sesión se guarda únicamente de forma local en este teléfono.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(fontSize: 11, color: Color(0xFF6B7280)),
                   ),
-                  label: const Text(
-                    'Iniciar sesión en Navegador (WebView)',
-                    style: TextStyle(
-                      color: Color(0xFF58A6FF),
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  style: OutlinedButton.styleFrom(
-                    side: const BorderSide(color: Color(0xFF30363D)),
-                    padding: const EdgeInsets.symmetric(
-                      vertical: 14,
-                      horizontal: 20,
-                    ),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    backgroundColor: const Color(0xFF161B22),
-                  ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
@@ -293,96 +333,39 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 }
 
-class _WebViewLoginScreen extends StatefulWidget {
-  final MoodleService moodleService;
-  final VoidCallback onSuccess;
+class _AuthTabButton extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
 
-  const _WebViewLoginScreen({
-    required this.moodleService,
-    required this.onSuccess,
+  const _AuthTabButton({
+    required this.label,
+    required this.selected,
+    required this.onTap,
   });
 
   @override
-  State<_WebViewLoginScreen> createState() => _WebViewLoginScreenState();
-}
-
-class _WebViewLoginScreenState extends State<_WebViewLoginScreen> {
-  late final WebViewController _controller;
-  late final WebViewCookieManager _cookieManager;
-  bool _isLoading = true;
-  bool _foundSession = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _cookieManager = WebViewCookieManager();
-    _controller = WebViewController()
-      ..setJavaScriptMode(JavaScriptMode.unrestricted)
-      ..setUserAgent(
-        'Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36',
-      )
-      ..setNavigationDelegate(
-        NavigationDelegate(
-          onPageStarted: (url) {
-            setState(() => _isLoading = true);
-            _checkAuth(url);
-          },
-          onPageFinished: (url) {
-            setState(() => _isLoading = false);
-            _checkAuth(url);
-          },
-        ),
-      )
-      ..loadRequest(Uri.parse('https://aula.usm.cl/login/index.php'));
-  }
-
-  Future<void> _checkAuth(String url) async {
-    if (_foundSession) return;
-    final lower = url.toLowerCase();
-
-    // Comprobar cookies del dominio aula.usm.cl a través de WebViewCookieManager nativo
-    try {
-      final cookies = await _cookieManager.getCookies(domain: Uri.parse('https://aula.usm.cl'));
-      final moodleCookie = cookies.firstWhere(
-        (c) => c.name == 'MoodleSession',
-        orElse: () => const WebViewCookie(name: '', value: '', domain: ''),
-      );
-
-      if (moodleCookie.value.isNotEmpty) {
-        // Verificar que estamos fuera del login/portada
-        if (lower.contains('aula.usm.cl') &&
-            !lower.contains('/portada') &&
-            !lower.contains('/login') &&
-            !lower.contains('/auth/')) {
-          _foundSession = true;
-          final cookieStr = 'MoodleSession=${moodleCookie.value}';
-          await widget.moodleService.loginWithCookie(cookieStr);
-          if (mounted) {
-            widget.onSuccess();
-          }
-        }
-      }
-    } catch (_) {}
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text(
-          'Aula USM — Iniciar sesión',
-          style: TextStyle(fontSize: 16),
-        ),
-        backgroundColor: const Color(0xFF161B22),
-      ),
-      body: Stack(
-        children: [
-          WebViewWidget(controller: _controller),
-          if (_isLoading)
-            const Center(
-              child: CircularProgressIndicator(color: Color(0xFF38BDF8)),
+    return Expanded(
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 9),
+          decoration: BoxDecoration(
+            color: selected ? const Color(0xFF26262E) : Colors.transparent,
+            borderRadius: BorderRadius.circular(6),
+            border: selected ? Border.all(color: const Color(0xFF38BDF8), width: 1) : null,
+          ),
+          alignment: Alignment.center,
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: selected ? FontWeight.w600 : FontWeight.w500,
+              color: selected ? const Color(0xFFF3F4F6) : const Color(0xFF9CA3AF),
             ),
-        ],
+          ),
+        ),
       ),
     );
   }
