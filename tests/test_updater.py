@@ -66,6 +66,73 @@ class UpdaterLogicTests(unittest.TestCase):
         fallback = updater.select_windows_asset(exe_only, "onedir")
         self.assertEqual(fallback["name"], "Aula-Scrapt-Windows.exe")
 
+    def test_launch_windows_updater_flags_and_pyi_env_cleanup(self):
+        import os
+        import subprocess
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app_dir = Path(tmp)
+            staged = app_dir / "Aula-Scrapt-Windows.exe"
+            staged.write_bytes(b"MZ" + b"\x00" * 1024)
+            created_ps1 = []
+
+            def fake_popen(cmd, **kwargs):
+                ps1 = Path(cmd[-1])
+                created_ps1.append((ps1, ps1.read_text(encoding="utf-8-sig"), kwargs))
+                return Mock()
+
+            with (
+                patch.object(updater.sys, "frozen", True, create=True),
+                patch.object(updater.sys, "executable", str(app_dir / "Aula-Scrapt-Windows.exe")),
+                patch.object(updater, "APP_ROOT", app_dir),
+                patch.object(updater, "can_write_to_app_dir", return_value=True),
+                patch.object(updater.subprocess, "Popen", side_effect=fake_popen),
+            ):
+                info = updater.launch_windows_updater(staged)
+
+            self.assertTrue(info["launched"])
+            self.assertFalse(info["requires_elevation"])
+            self.assertEqual(len(created_ps1), 1)
+            ps1_path, script_text, popen_kwargs = created_ps1[0]
+            ps1_path.unlink(missing_ok=True)
+
+            flags = popen_kwargs.get("creationflags", 0)
+            detached = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+            no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+            self.assertEqual(flags & detached, 0)
+            self.assertEqual(flags & no_window, no_window)
+            self.assertIn("Env:_MEIPASS2", script_text)
+            self.assertIn("Env:_PYI_APPLICATION_HOME_DIR", script_text)
+            self.assertIn("Env:_PYI_ARCHIVE_FILE", script_text)
+            self.assertIn("Env:_PYI_PARENT_PROCESS_LEVEL", script_text)
+
+    def test_launch_windows_updater_uac_calls_ctypes_and_handles_cancel(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            app_dir = Path(tmp)
+            staged = app_dir / "Aula-Scrapt-Windows.exe"
+            staged.write_bytes(b"MZ" + b"\x00" * 1024)
+            fake_shell32 = Mock()
+            fake_shell32.ShellExecuteW.return_value = 5  # UAC cancelado
+
+            with (
+                patch.object(updater.sys, "frozen", True, create=True),
+                patch.object(updater.sys, "executable", str(app_dir / "Aula-Scrapt-Windows.exe")),
+                patch.object(updater, "APP_ROOT", app_dir),
+                patch.object(updater, "can_write_to_app_dir", return_value=False),
+                patch.object(updater.ctypes.windll, "shell32", fake_shell32),
+            ):
+                with self.assertRaises(PermissionError):
+                    updater.launch_windows_updater(staged)
+
+            fake_shell32.ShellExecuteW.assert_called_once()
+            script_leftover = list(
+                Path(tempfile.gettempdir()).glob(f"aula_scrapt_updater_{updater.os.getpid()}.ps1")
+            )
+            self.assertEqual(script_leftover, [])
+
 
 class UpdaterApiTests(unittest.TestCase):
     def setUp(self):

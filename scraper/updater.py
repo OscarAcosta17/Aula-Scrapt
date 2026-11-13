@@ -1,3 +1,4 @@
+import ctypes
 import hashlib
 import os
 import re
@@ -356,7 +357,6 @@ def launch_windows_updater(staged_path: Path) -> Dict:
         apply_block = f"""
 $targetExe = {_ps_quote(str(current_exe))}
 $backupExe = "$targetExe.bak"
-Remove-Item Env:_MEIPASS2 -ErrorAction SilentlyContinue
 $moved = $false
 for ($r = 0; $r -lt 20; $r++) {{
     try {{
@@ -371,6 +371,7 @@ for ($r = 0; $r -lt 20; $r++) {{
 if (-not $moved) {{ throw 'No se pudo reemplazar el ejecutable porque sigue en uso.' }}
 try {{
     Copy-Item -Force $stagedFile $targetExe
+    Start-Sleep -Milliseconds 300
     Remove-Item -Force $backupExe -ErrorAction SilentlyContinue
 }} catch {{
     if ((Test-Path $backupExe) -and -not (Test-Path $targetExe)) {{
@@ -385,7 +386,6 @@ Start-Process -FilePath $targetExe -WorkingDirectory $appDir
         extract_dir = Path(tempfile.gettempdir()) / f"aula_scrapt_extract_{current_pid}"
         apply_block = f"""
 $extractDir = {_ps_quote(str(extract_dir))}
-Remove-Item Env:_MEIPASS2 -ErrorAction SilentlyContinue
 if (Test-Path $extractDir) {{ Remove-Item -Recurse -Force $extractDir }}
 Expand-Archive -Path $stagedFile -DestinationPath $extractDir -Force
 $exeCandidate = Get-ChildItem -Path $extractDir -Filter 'Aula-Scrapt*.exe' -Recurse | Select-Object -First 1
@@ -427,6 +427,12 @@ try {{
         Start-Sleep -Milliseconds 300
     }}
     Start-Sleep -Milliseconds 500
+    # Limpiar variables heredadas de PyInstaller (v4-v6) antes de relanzar el nuevo binario
+    Remove-Item Env:_MEIPASS2 -ErrorAction SilentlyContinue
+    Remove-Item Env:_PYI_ARCHIVE_FILE -ErrorAction SilentlyContinue
+    Remove-Item Env:_PYI_APPLICATION_HOME_DIR -ErrorAction SilentlyContinue
+    Remove-Item Env:_PYI_PARENT_PROCESS_LEVEL -ErrorAction SilentlyContinue
+    Remove-Item Env:_PYI_SPLASH_IPC -ErrorAction SilentlyContinue
     {apply_block}
 }} catch {{
     $_ | Out-File -FilePath $logFile -Encoding utf8
@@ -453,9 +459,8 @@ try {{
                 "No se concedieron permisos de administrador (UAC) en Windows."
             )
     else:
-        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) | getattr(
-            subprocess, "DETACHED_PROCESS", 0
-        )
+        # Usar solo CREATE_NO_WINDOW (nunca combinar con DETACHED_PROCESS: Win32 provoca salida silenciosa en 0)
+        creation_flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         subprocess.Popen(
             [
                 "powershell.exe",
@@ -468,6 +473,9 @@ try {{
                 str(script_path),
             ],
             cwd=str(app_dir),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
             creationflags=creation_flags,
             close_fds=True,
         )
