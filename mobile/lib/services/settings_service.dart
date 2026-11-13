@@ -23,8 +23,15 @@ class SettingsService {
   static const String _keyCourseSubfolders = 'settings_course_subfolders';
   static const String _keyCourseOrgSection = 'settings_course_org_section';
   static const String _keyHistory = 'download_history_json';
+  static const String _keyThemeMode = 'settings_theme_mode';
+  static const String _keyUseDynamicColor = 'settings_use_dynamic_color';
+
+  final ValueNotifier<int> themeNotifier = ValueNotifier<int>(0);
 
   String _downloadRoot = '';
+  ThemeMode _themeMode = ThemeMode.system;
+  bool _useDynamicColor = true;
+  Color? _cachedSystemSeedColor;
   Map<String, String> _courseFolders = {};
   Map<String, String> _courseSubfolders = {};
   Map<String, bool> _courseOrgBySection = {};
@@ -35,7 +42,19 @@ class SettingsService {
   };
 
   String get downloadRoot => _downloadRoot;
+  ThemeMode get themeMode => _themeMode;
+  bool get useDynamicColor => _useDynamicColor;
+  Color? get systemSeedColor => _cachedSystemSeedColor;
   Map<String, dynamic> get history => _history;
+
+  /// Versión compacta legible de la ruta de guardado para tarjetas móviles
+  String get shortDownloadRoot {
+    if (_downloadRoot.startsWith('/storage/emulated/0/')) {
+      return _downloadRoot.substring('/storage/emulated/0/'.length);
+    }
+    if (_downloadRoot == '/storage/emulated/0') return 'Almacenamiento interno';
+    return _downloadRoot;
+  }
 
   Future<void> init() async {
     final prefs = await SharedPreferences.getInstance();
@@ -55,6 +74,15 @@ class SettingsService {
       _downloadRoot = p.join(doc.path, 'Aula-USM');
     }
 
+    final savedTheme = prefs.getString(_keyThemeMode);
+    _themeMode = switch (savedTheme) {
+      'dark' => ThemeMode.dark,
+      'light' => ThemeMode.light,
+      _ => ThemeMode.system,
+    };
+    _useDynamicColor = prefs.getBool(_keyUseDynamicColor) ?? true;
+    await refreshSystemSeedColor();
+
     _courseFolders = _decodeStringMap(prefs.getString(_keyCourseFolders));
     _courseSubfolders = _decodeStringMap(prefs.getString(_keyCourseSubfolders));
     _courseOrgBySection = _decodeBoolMap(prefs.getString(_keyCourseOrgSection));
@@ -70,6 +98,36 @@ class SettingsService {
         };
       } catch (_) {}
     }
+  }
+
+  Future<void> refreshSystemSeedColor() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final raw = await _channel.invokeMethod<int>('getSystemSeedColor');
+      _cachedSystemSeedColor = raw != null ? Color(raw.toUnsigned(32)) : null;
+    } catch (_) {
+      _cachedSystemSeedColor = null;
+    }
+  }
+
+  Future<void> setThemeMode(ThemeMode mode) async {
+    _themeMode = mode;
+    themeNotifier.value++;
+    final prefs = await SharedPreferences.getInstance();
+    final str = switch (mode) {
+      ThemeMode.dark => 'dark',
+      ThemeMode.light => 'light',
+      ThemeMode.system => 'system',
+    };
+    await prefs.setString(_keyThemeMode, str);
+  }
+
+  Future<void> setUseDynamicColor(bool value) async {
+    _useDynamicColor = value;
+    await refreshSystemSeedColor();
+    themeNotifier.value++;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyUseDynamicColor, value);
   }
 
   Map<String, String> _decodeStringMap(String? raw) {
@@ -173,35 +231,26 @@ class SettingsService {
 
       final proceed = await showDialog<bool>(
         context: context,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: const Color(0xFF17171C),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(10),
-            side: const BorderSide(color: Color(0xFF2A2A33)),
-          ),
-          title: const Text(
-            'Permiso de almacenamiento requerido',
-            style: TextStyle(color: Color(0xFFF3F4F6), fontSize: 16, fontWeight: FontWeight.w600),
-          ),
-          content: const Text(
-            'Android 11 o superior requiere habilitar el permiso "Acceso a todos los archivos" para que Aula-Scrapt pueda guardar PDFs y notas .md en la carpeta que elijas (como Documentos o tu bóveda de Obsidian).\n\nEn la siguiente pantalla activa el interruptor de Aula-Scrapt y vuelve atrás.',
-            style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 13, height: 1.45),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('Cancelar', style: TextStyle(color: Color(0xFF9CA3AF))),
+        builder: (ctx) {
+          final cs = Theme.of(ctx).colorScheme;
+          return AlertDialog(
+            icon: Icon(Icons.folder_copy_rounded, color: cs.primary, size: 28),
+            title: const Text('Permiso de almacenamiento'),
+            content: const Text(
+              'Android 11 o superior requiere habilitar "Acceso a todos los archivos" para guardar PDFs y notas .md en la carpeta que elijas (como Documentos o Obsidian).\n\nEn la siguiente pantalla activa el interruptor de Aula-Scrapt y vuelve atrás.',
             ),
-            ElevatedButton(
-              onPressed: () => Navigator.of(ctx).pop(true),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: const Color(0xFFF3F4F6),
-                foregroundColor: const Color(0xFF0F0F12),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: const Text('Cancelar'),
               ),
-              child: const Text('Conceder permiso', style: TextStyle(fontWeight: FontWeight.w600)),
-            ),
-          ],
-        ),
+              FilledButton(
+                onPressed: () => Navigator.of(ctx).pop(true),
+                child: const Text('Conceder permiso'),
+              ),
+            ],
+          );
+        },
       );
 
       if (proceed != true) return false;
@@ -214,27 +263,29 @@ class SettingsService {
       if (status.isPermanentlyDenied && context.mounted) {
         await showDialog(
           context: context,
-          builder: (ctx) => AlertDialog(
-            backgroundColor: const Color(0xFF17171C),
-            title: const Text('Permiso denegado', style: TextStyle(color: Colors.white, fontSize: 16)),
-            content: const Text(
-              'Habilita el permiso de Almacenamiento en Ajustes de la aplicación para descargar archivos.',
-              style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 13),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.of(ctx).pop(),
-                child: const Text('Cerrar'),
+          builder: (ctx) {
+            final cs = Theme.of(ctx).colorScheme;
+            return AlertDialog(
+              icon: Icon(Icons.security_rounded, color: cs.error, size: 28),
+              title: const Text('Permiso denegado'),
+              content: const Text(
+                'Habilita el permiso de Almacenamiento en Ajustes de la aplicación para descargar archivos.',
               ),
-              ElevatedButton(
-                onPressed: () {
-                  Navigator.of(ctx).pop();
-                  openAppSettings();
-                },
-                child: const Text('Abrir Ajustes'),
-              ),
-            ],
-          ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(),
+                  child: const Text('Cerrar'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    Navigator.of(ctx).pop();
+                    openAppSettings();
+                  },
+                  child: const Text('Abrir Ajustes'),
+                ),
+              ],
+            );
+          },
         );
       }
       return status.isGranted;

@@ -4,8 +4,7 @@ import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import '../services/settings_service.dart';
 
-/// Abre un selector completo de carpeta para Android (accesos rápidos, explorador de directorios,
-/// creación de carpetas, selector nativo del sistema y edición manual).
+/// Selector moderno Material 3 Expressive de carpeta para Android
 Future<String?> showFolderPickerDialog(
   BuildContext context,
   SettingsService settingsService,
@@ -26,11 +25,7 @@ Future<String?> showFolderPickerDialog(
   return showModalBottomSheet<String>(
     context: context,
     isScrollControlled: true,
-    backgroundColor: const Color(0xFF17171C),
-    shape: const RoundedRectangleBorder(
-      borderRadius: BorderRadius.vertical(top: Radius.circular(14)),
-      side: BorderSide(color: Color(0xFF2A2A33)),
-    ),
+    useSafeArea: true,
     builder: (ctx) => _FolderPickerSheet(
       initialPath: currentPath,
       extRoot: extRoot,
@@ -105,7 +100,7 @@ class _FolderPickerSheetState extends State<_FolderPickerSheet> {
         err = 'La carpeta aún no existe (se creará al descargar o al usarla).';
       }
     } on FileSystemException catch (e) {
-      err = 'No se puede explorar esta carpeta (${e.message}). Concede permiso de almacenamiento o usa otra ruta.';
+      err = 'No se puede explorar esta carpeta (${e.message}). Concede permiso o usa otra ruta.';
     } catch (e) {
       err = e.toString();
     }
@@ -125,15 +120,17 @@ class _FolderPickerSheetState extends State<_FolderPickerSheet> {
     final createdName = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        backgroundColor: const Color(0xFF17171C),
-        title: const Text('Nueva carpeta', style: TextStyle(color: Colors.white, fontSize: 16)),
+        icon: Icon(
+          Icons.create_new_folder_rounded,
+          color: Theme.of(ctx).colorScheme.primary,
+        ),
+        title: const Text('Nueva carpeta'),
         content: TextField(
           controller: nameCtrl,
           autofocus: true,
-          style: const TextStyle(color: Colors.white),
           decoration: const InputDecoration(
+            labelText: 'Nombre',
             hintText: 'Ej: Obsidian o Ramos',
-            hintStyle: TextStyle(color: Color(0xFF6B7280)),
           ),
         ),
         actions: [
@@ -141,12 +138,8 @@ class _FolderPickerSheetState extends State<_FolderPickerSheet> {
             onPressed: () => Navigator.of(ctx).pop(),
             child: const Text('Cancelar'),
           ),
-          ElevatedButton(
+          FilledButton(
             onPressed: () => Navigator.of(ctx).pop(nameCtrl.text.trim()),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFF3F4F6),
-              foregroundColor: const Color(0xFF0F0F12),
-            ),
             child: const Text('Crear'),
           ),
         ],
@@ -162,7 +155,7 @@ class _FolderPickerSheetState extends State<_FolderPickerSheet> {
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('No se pudo crear la carpeta: $e'), backgroundColor: Colors.red),
+            SnackBar(content: Text('No se pudo crear la carpeta: $e')),
           );
         }
       }
@@ -171,221 +164,238 @@ class _FolderPickerSheetState extends State<_FolderPickerSheet> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
     final parentPath = p.dirname(_currentPath);
     final canGoUp = parentPath != _currentPath && _currentPath != '/';
 
-    return SafeArea(
-      child: SizedBox(
-        height: MediaQuery.of(context).size.height * 0.78,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // Header
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 14, 12, 8),
-              child: Row(
-                children: [
-                  const Expanded(
-                    child: Text(
-                      'Elegir carpeta de destino',
-                      style: TextStyle(
-                        color: Color(0xFFF3F4F6),
-                        fontSize: 16,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
+    return SizedBox(
+      height: MediaQuery.of(context).size.height * 0.82,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 12, 8),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: cs.primaryContainer,
+                    borderRadius: BorderRadius.circular(14),
                   ),
-                  IconButton(
-                    icon: const Icon(Icons.close, color: Color(0xFF9CA3AF)),
-                    onPressed: () => Navigator.of(context).pop(),
-                  ),
-                ],
-              ),
-            ),
-            const Divider(color: Color(0xFF2A2A33), height: 1),
-
-            if (!_hasPermission && Platform.isAndroid)
-              Container(
-                color: const Color(0x33EAB308),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-                child: Row(
-                  children: [
-                    const Expanded(
-                      child: Text(
-                        'Permiso "Todos los archivos" desactivado.',
-                        style: TextStyle(color: Color(0xFFFACC15), fontSize: 12),
-                      ),
-                    ),
-                    TextButton(
-                      onPressed: () async {
-                        await widget.settingsService.ensureStoragePermission(context);
-                        await _loadDir(_currentPath);
-                      },
-                      child: const Text('Activar', style: TextStyle(color: Color(0xFFFACC15))),
-                    ),
-                  ],
+                  child: Icon(Icons.folder_copy_rounded, color: cs.onPrimaryContainer, size: 22),
                 ),
-              ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Text(
+                    'Carpeta de destino',
+                    style: tt.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+                  ),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.close_rounded),
+                  onPressed: () => Navigator.of(context).pop(),
+                ),
+              ],
+            ),
+          ),
 
-            // Accesos rápidos + selector sistema
+          if (!_hasPermission && Platform.isAndroid)
             Padding(
-              padding: const EdgeInsets.fromLTRB(14, 10, 14, 6),
-              child: SingleChildScrollView(
-                scrollDirection: Axis.horizontal,
-                child: Row(
-                  children: [
-                    _QuickPathChip(
-                      label: 'Documents/Obsidian',
-                      onTap: () => _loadDir('${widget.extRoot}/Documents/Obsidian'),
-                    ),
-                    const SizedBox(width: 8),
-                    _QuickPathChip(
-                      label: 'Documents/Aula-USM',
-                      onTap: () => _loadDir('${widget.extRoot}/Documents/Aula-USM'),
-                    ),
-                    const SizedBox(width: 8),
-                    _QuickPathChip(
-                      label: 'Download/Aula-USM',
-                      onTap: () => _loadDir('${widget.extRoot}/Download/Aula-USM'),
-                    ),
-                    const SizedBox(width: 8),
-                    _QuickPathChip(
-                      label: 'Selector del sistema...',
-                      icon: Icons.folder_open,
-                      onTap: () async {
-                        final picked =
-                            await widget.settingsService.pickNativeAndroidDirectory();
-                        if (picked != null && picked.isNotEmpty) {
-                          await _loadDir(picked);
-                        }
-                      },
-                    ),
-                    const SizedBox(width: 8),
-                    _QuickPathChip(
-                      label: 'Carpeta interna app',
-                      onTap: () async {
-                        final d = await getExternalStorageDirectory() ??
-                            await getApplicationDocumentsDirectory();
-                        await _loadDir(p.join(d.path, 'Aula-USM'));
-                      },
-                    ),
-                  ],
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+              child: Card(
+                color: cs.tertiaryContainer,
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  child: Row(
+                    children: [
+                      Icon(Icons.info_outline_rounded,
+                          color: cs.onTertiaryContainer, size: 20),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          'Permiso "Todos los archivos" desactivado.',
+                          style: tt.bodySmall?.copyWith(color: cs.onTertiaryContainer),
+                        ),
+                      ),
+                      FilledButton.tonal(
+                        onPressed: () async {
+                          await widget.settingsService.ensureStoragePermission(context);
+                          await _loadDir(_currentPath);
+                        },
+                        style: FilledButton.styleFrom(
+                          minimumSize: const Size(72, 36),
+                          padding: const EdgeInsets.symmetric(horizontal: 12),
+                        ),
+                        child: const Text('Activar'),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
 
-            // Input ruta manual + acciones carpeta actual
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
-              child: Row(
-                children: [
-                  IconButton(
-                    icon: Icon(
-                      Icons.arrow_upward,
-                      size: 18,
-                      color: canGoUp ? const Color(0xFFF3F4F6) : const Color(0xFF4B5563),
-                    ),
-                    tooltip: 'Subir un nivel',
-                    onPressed: canGoUp ? () => _loadDir(parentPath) : null,
-                  ),
-                  Expanded(
-                    child: TextField(
-                      controller: _pathCtrl,
-                      style: const TextStyle(color: Color(0xFFF3F4F6), fontSize: 12),
-                      onSubmitted: (val) => _loadDir(val.trim()),
-                      decoration: InputDecoration(
-                        isDense: true,
-                        filled: true,
-                        fillColor: const Color(0xFF0F0F12),
-                        contentPadding:
-                            const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(6),
-                          borderSide: const BorderSide(color: Color(0xFF2A2A33)),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(6),
-                          borderSide: const BorderSide(color: Color(0xFF2A2A33)),
-                        ),
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.create_new_folder_outlined,
-                        size: 20, color: Color(0xFF38BDF8)),
-                    tooltip: 'Crear nueva carpeta aquí',
-                    onPressed: _createNewFolder,
-                  ),
-                ],
-              ),
+          // Accesos rápidos Material 3 ActionChips
+          SizedBox(
+            height: 48,
+            child: ListView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              children: [
+                ActionChip(
+                  avatar: const Icon(Icons.auto_stories_outlined, size: 17),
+                  label: const Text('Obsidian'),
+                  onPressed: () => _loadDir('${widget.extRoot}/Documents/Obsidian'),
+                ),
+                const SizedBox(width: 8),
+                ActionChip(
+                  avatar: const Icon(Icons.description_outlined, size: 17),
+                  label: const Text('Documents/Aula-USM'),
+                  onPressed: () => _loadDir('${widget.extRoot}/Documents/Aula-USM'),
+                ),
+                const SizedBox(width: 8),
+                ActionChip(
+                  avatar: const Icon(Icons.download_outlined, size: 17),
+                  label: const Text('Download/Aula-USM'),
+                  onPressed: () => _loadDir('${widget.extRoot}/Download/Aula-USM'),
+                ),
+                const SizedBox(width: 8),
+                ActionChip(
+                  avatar: Icon(Icons.folder_open_rounded, size: 17, color: cs.primary),
+                  label: const Text('Archivos de Android'),
+                  onPressed: () async {
+                    final picked =
+                        await widget.settingsService.pickNativeAndroidDirectory();
+                    if (picked != null && picked.isNotEmpty) {
+                      await _loadDir(picked);
+                    }
+                  },
+                ),
+                const SizedBox(width: 8),
+                ActionChip(
+                  avatar: const Icon(Icons.phone_android_rounded, size: 17),
+                  label: const Text('Carpeta interna'),
+                  onPressed: () async {
+                    final d = await getExternalStorageDirectory() ??
+                        await getApplicationDocumentsDirectory();
+                    await _loadDir(p.join(d.path, 'Aula-USM'));
+                  },
+                ),
+              ],
             ),
+          ),
+          const SizedBox(height: 8),
 
-            // Lista de subcarpetas
-            Expanded(
-              child: _loading
-                  ? const Center(child: CircularProgressIndicator(color: Color(0xFF38BDF8)))
-                  : _errorText != null && _subdirs.isEmpty
-                      ? Padding(
-                          padding: const EdgeInsets.all(20),
-                          child: Center(
-                            child: Text(
-                              _errorText!,
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(color: Color(0xFF9CA3AF), fontSize: 12),
-                            ),
+          // Barra de ruta + subir / nueva carpeta
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(
+              children: [
+                IconButton.filledTonal(
+                  icon: const Icon(Icons.arrow_upward_rounded),
+                  tooltip: 'Subir un nivel',
+                  onPressed: canGoUp ? () => _loadDir(parentPath) : null,
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: TextField(
+                    controller: _pathCtrl,
+                    style: tt.bodySmall?.copyWith(fontFamily: 'monospace'),
+                    onSubmitted: (val) => _loadDir(val.trim()),
+                    decoration: const InputDecoration(
+                      labelText: 'Ruta actual',
+                      contentPadding: EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                IconButton.filledTonal(
+                  icon: const Icon(Icons.create_new_folder_outlined),
+                  tooltip: 'Crear carpeta aquí',
+                  onPressed: _createNewFolder,
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+
+          // Explorador de subcarpetas
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : _errorText != null && _subdirs.isEmpty
+                    ? Center(
+                        child: Padding(
+                          padding: const EdgeInsets.all(24),
+                          child: Text(
+                            _errorText!,
+                            textAlign: TextAlign.center,
+                            style: tt.bodyMedium?.copyWith(color: cs.onSurfaceVariant),
                           ),
-                        )
-                      : _subdirs.isEmpty
-                          ? const Center(
-                              child: Text(
-                                'Carpeta sin subcarpetas.',
-                                style: TextStyle(color: Color(0xFF6B7280), fontSize: 12),
-                              ),
-                            )
-                          : ListView.separated(
-                              itemCount: _subdirs.length,
-                              separatorBuilder: (_, _) =>
-                                  const Divider(color: Color(0xFF2A2A33), height: 1),
-                              itemBuilder: (ctx, idx) {
-                                final d = _subdirs[idx];
-                                return ListTile(
-                                  dense: true,
-                                  leading: const Icon(Icons.folder, color: Color(0xFF38BDF8), size: 20),
-                                  title: Text(
-                                    p.basename(d.path),
-                                    style: const TextStyle(color: Color(0xFFF3F4F6), fontSize: 13),
-                                  ),
-                                  trailing: const Icon(Icons.chevron_right,
-                                      color: Color(0xFF6B7280), size: 18),
-                                  onTap: () => _loadDir(d.path),
-                                );
-                              },
+                        ),
+                      )
+                    : _subdirs.isEmpty
+                        ? Center(
+                            child: Text(
+                              'Sin subcarpetas en esta ubicación.',
+                              style: tt.bodyMedium?.copyWith(color: cs.onSurfaceVariant),
                             ),
-            ),
+                          )
+                        : ListView.separated(
+                            padding: const EdgeInsets.fromLTRB(16, 4, 16, 16),
+                            itemCount: _subdirs.length,
+                            separatorBuilder: (_, _) => const SizedBox(height: 6),
+                            itemBuilder: (ctx, idx) {
+                              final d = _subdirs[idx];
+                              return ListTile(
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(18),
+                                ),
+                                tileColor: cs.surfaceContainerHigh,
+                                leading: Container(
+                                  width: 40,
+                                  height: 40,
+                                  decoration: BoxDecoration(
+                                    color: cs.primaryContainer.withValues(alpha: 0.7),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Icon(Icons.folder_rounded,
+                                      color: cs.onPrimaryContainer),
+                                ),
+                                title: Text(
+                                  p.basename(d.path),
+                                  style: tt.bodyMedium?.copyWith(fontWeight: FontWeight.w500),
+                                ),
+                                trailing: Icon(Icons.chevron_right_rounded,
+                                    color: cs.onSurfaceVariant),
+                                onTap: () => _loadDir(d.path),
+                              );
+                            },
+                          ),
+          ),
 
-            // Footer botones
-            Container(
-              padding: const EdgeInsets.fromLTRB(14, 10, 14, 14),
-              decoration: const BoxDecoration(
-                color: Color(0xFF1E1E24),
-                border: Border(top: BorderSide(color: Color(0xFF2A2A33))),
-              ),
+          // Footer limpio dentro de SafeArea
+          Container(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+            decoration: BoxDecoration(
+              color: cs.surfaceContainer,
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+            ),
+            child: SafeArea(
+              top: false,
               child: Row(
                 children: [
                   Expanded(
                     child: OutlinedButton(
                       onPressed: () => Navigator.of(context).pop(),
-                      style: OutlinedButton.styleFrom(
-                        side: const BorderSide(color: Color(0xFF2A2A33)),
-                        foregroundColor: const Color(0xFFF3F4F6),
-                      ),
                       child: const Text('Cancelar'),
                     ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
                     flex: 2,
-                    child: ElevatedButton(
+                    child: FilledButton.icon(
                       onPressed: () async {
                         final chosen = _pathCtrl.text.trim();
                         if (chosen.isEmpty) return;
@@ -396,60 +406,15 @@ class _FolderPickerSheetState extends State<_FolderPickerSheet> {
                           Navigator.of(context).pop(chosen);
                         }
                       },
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFF3F4F6),
-                        foregroundColor: const Color(0xFF0F0F12),
-                      ),
-                      child: const Text('Usar esta carpeta',
-                          style: TextStyle(fontWeight: FontWeight.w600)),
+                      icon: const Icon(Icons.check_rounded),
+                      label: const Text('Usar esta carpeta'),
                     ),
                   ),
                 ],
               ),
             ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _QuickPathChip extends StatelessWidget {
-  final String label;
-  final IconData? icon;
-  final VoidCallback onTap;
-
-  const _QuickPathChip({
-    required this.label,
-    required this.onTap,
-    this.icon,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(6),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(
-          color: const Color(0xFF0F0F12),
-          borderRadius: BorderRadius.circular(6),
-          border: Border.all(color: const Color(0xFF2A2A33)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (icon != null) ...[
-              Icon(icon, size: 14, color: const Color(0xFF38BDF8)),
-              const SizedBox(width: 6),
-            ],
-            Text(
-              label,
-              style: const TextStyle(color: Color(0xFFF3F4F6), fontSize: 12),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

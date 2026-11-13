@@ -9,6 +9,7 @@
         android:label="Aula-Scrapt"
         android:usesCleartextTraffic="true"
         android:requestLegacyExternalStorage="true"
+        android:enableOnBackInvokedCallback="true"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round">

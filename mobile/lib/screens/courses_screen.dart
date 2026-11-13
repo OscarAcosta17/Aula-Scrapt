@@ -27,20 +27,21 @@ class CoursesScreen extends StatefulWidget {
 
 class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserver {
   late final DownloaderService _downloaderService;
+  final _searchCtrl = TextEditingController();
 
   List<MoodleCourse> _courses = [];
   List<String> _existingSubfolders = [];
   ResourceFilter _filter = ResourceFilter.files;
+  String _searchQuery = '';
 
   final Set<int> _expandedCourses = {};
   final Set<String> _expandedSections = {};
-  final Map<int, TextEditingController> _folderCtrls = {};
-  final Map<int, TextEditingController> _subfolderCtrls = {};
+  int? _activeWideCourseId;
 
   bool _isScanning = false;
   bool _hasStoragePermission = true;
-  String _statusMessage = 'Presiona "Actualizar cursos" para cargar tus asignaturas.';
-  Color _statusColor = const Color(0xFF9CA3AF);
+  String? _statusMessage;
+  bool _statusIsError = false;
 
   // Estado de descarga
   bool _isDownloading = false;
@@ -63,12 +64,7 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    for (final c in _folderCtrls.values) {
-      c.dispose();
-    }
-    for (final c in _subfolderCtrls.values) {
-      c.dispose();
-    }
+    _searchCtrl.dispose();
     super.dispose();
   }
 
@@ -76,6 +72,11 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _refreshPermissionAndSubfolders();
+      widget.settingsService.refreshSystemSeedColor().then((_) {
+        if (widget.settingsService.useDynamicColor) {
+          widget.settingsService.themeNotifier.value++;
+        }
+      });
     }
   }
 
@@ -100,13 +101,11 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
     }
   }
 
-  void _setStatus(String msg, [String type = 'info']) {
+  void _setStatus(String? msg, {bool isError = false}) {
     if (!mounted) return;
     setState(() {
       _statusMessage = msg;
-      _statusColor = type == 'error'
-          ? const Color(0xFFF87171)
-          : (type == 'success' ? const Color(0xFF86EFAC) : const Color(0xFF9CA3AF));
+      _statusIsError = isError;
     });
   }
 
@@ -124,8 +123,11 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
 
   Future<void> _scanAula() async {
     if (_isScanning) return;
-    setState(() => _isScanning = true);
-    _setStatus('Consultando cursos y archivos en Aula USM...');
+    setState(() {
+      _isScanning = true;
+      _statusMessage = null;
+      _statusIsError = false;
+    });
 
     try {
       final subs = await widget.settingsService.listExistingSubfolders();
@@ -133,19 +135,20 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
 
       for (final c in courses) {
         c.isLoadingContents = true;
-        _folderCtrls[c.id]?.dispose();
-        _folderCtrls[c.id] = TextEditingController(text: c.obsidianFolder);
-        _subfolderCtrls[c.id]?.dispose();
-        _subfolderCtrls[c.id] = TextEditingController(text: c.targetSubfolder);
       }
 
       if (!mounted) return;
       setState(() {
         _existingSubfolders = subs;
         _courses = courses;
+        if (courses.isNotEmpty &&
+            (_activeWideCourseId == null ||
+                !courses.any((c) => c.id == _activeWideCourseId))) {
+          _activeWideCourseId = courses.first.id;
+        }
       });
 
-      // Escanear cursos concurrentemente en lotes de 3 para máxima velocidad sin saturar Aula
+      // Escanear cursos concurrentemente en lotes de 3
       for (var i = 0; i < courses.length; i += 3) {
         final batch = courses.sublist(i, (i + 3).clamp(0, courses.length));
         await Future.wait(batch.map((c) async {
@@ -165,22 +168,20 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
       }
 
       if (mounted) {
-        final totalFiles = _totalFilesCount;
-        final totalNew = _totalPendingCount;
-        _setStatus(
-          'Listo: ${_courses.length} ramos cargados ($totalFiles archivos, $totalNew pendientes). Toca un ramo para desplegar sus secciones.',
-          'success',
-        );
+        _setStatus(null);
       }
     } on SessionExpiredException catch (e) {
-      _setStatus(e.message, 'error');
+      _setStatus(e.message, isError: true);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.message), backgroundColor: const Color(0xFFB91C1C)),
+          SnackBar(content: Text(e.message)),
         );
       }
     } catch (e) {
-      _setStatus('Error al consultar Aula USM: ${e.toString().replaceAll('Exception: ', '')}', 'error');
+      _setStatus(
+        'Error al consultar Aula USM: ${e.toString().replaceAll('Exception: ', '')}',
+        isError: true,
+      );
     } finally {
       if (mounted) {
         setState(() => _isScanning = false);
@@ -198,18 +199,16 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
       await widget.settingsService.setDownloadRoot(chosen);
       final subs = await widget.settingsService.listExistingSubfolders();
 
-      // Re-evaluar carpetas sugeridas y archivos existentes en disco para la nueva ruta
       for (final c in _courses) {
         final resolved =
             widget.settingsService.resolveCourseFolderSync(c.id, c.fullname, subs);
         c.obsidianFolder = resolved;
-        _folderCtrls[c.id]?.text = resolved;
         await widget.moodleService.enrichItemsWithLocalStatus(c.items, c.obsidianFolder);
       }
 
       if (mounted) {
         setState(() => _existingSubfolders = subs);
-        _setStatus('Carpeta de guardado actualizada: $chosen', 'success');
+        _setStatus('Carpeta actualizada: ${widget.settingsService.shortDownloadRoot}');
       }
     }
   }
@@ -218,7 +217,7 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
     final ok = await widget.settingsService.ensureStoragePermission(context);
     await _refreshPermissionAndSubfolders();
     if (ok) {
-      _setStatus('Permiso de almacenamiento concedido correctamente.', 'success');
+      _setStatus('Permiso de almacenamiento concedido.');
       for (final c in _courses) {
         await widget.moodleService.enrichItemsWithLocalStatus(c.items, c.obsidianFolder);
       }
@@ -236,7 +235,7 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
       ),
     );
     if (ok == true) {
-      _setStatus('Sesión iniciada. Cargando cursos...', 'success');
+      _setStatus('Sesión iniciada. Actualizando ramos...');
       await _scanAula();
     }
   }
@@ -244,7 +243,7 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
   Future<void> _handleTokenModal() async {
     final ok = await showTokenLoginDialog(context, widget.moodleService);
     if (ok) {
-      _setStatus('Token verificado. Cargando cursos...', 'success');
+      _setStatus('Token verificado. Actualizando ramos...');
       await _scanAula();
     }
   }
@@ -252,7 +251,7 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
   Future<void> _handleCookieModal() async {
     final ok = await showCookieLoginDialog(context, widget.moodleService);
     if (ok) {
-      _setStatus('Cookie verificada. Cargando cursos...', 'success');
+      _setStatus('Cookie verificada. Actualizando ramos...');
       await _scanAula();
     }
   }
@@ -262,7 +261,7 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
     _goToLogin();
   }
 
-  // --- Cálculos y Selección ---
+  // --- Cálculos y selección ---
   int get _totalFilesCount =>
       _courses.fold(0, (sum, c) => sum + c.downloadableCount);
 
@@ -330,7 +329,6 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
     final queue = _selectedQueue;
     if (queue.isEmpty || _isDownloading) return;
 
-    // 1. Verificar/pedir permiso explícitamente ANTES de descargar
     if (Platform.isAndroid) {
       final hasPerm = await widget.settingsService.hasStoragePermission();
       if (!hasPerm) {
@@ -339,8 +337,8 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
         await _refreshPermissionAndSubfolders();
         if (!granted) {
           _setStatus(
-            'Descarga cancelada: habilita el permiso de almacenamiento para guardar archivos en "${widget.settingsService.downloadRoot}".',
-            'error',
+            'Descarga cancelada: habilita el permiso de almacenamiento.',
+            isError: true,
           );
           return;
         }
@@ -371,43 +369,32 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
 
       if (!mounted) return;
       if (res.downloadedCount > 0 && res.errors.isEmpty) {
-        final where = res.lastSavedDir ?? widget.settingsService.downloadRoot;
-        _setStatus(
-          '${res.downloadedCount} archivo(s) descargados y grafo .md actualizado en: $where',
-          'success',
-        );
+        final where = res.lastSavedDir ?? widget.settingsService.shortDownloadRoot;
+        _setStatus('${res.downloadedCount} archivo(s) guardados y grafo .md actualizado');
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('${res.downloadedCount} archivo(s) guardados en $where'),
-            backgroundColor: const Color(0xFF15803D),
-          ),
+          SnackBar(content: Text('${res.downloadedCount} archivo(s) guardados en $where')),
         );
       } else if (res.downloadedCount > 0 && res.errors.isNotEmpty) {
         _setStatus(
-          'Se descargaron ${res.downloadedCount} archivo(s), pero ${res.errors.length} fallaron (${res.errors.first.error}).',
-          'error',
+          '${res.downloadedCount} descargados, ${res.errors.length} fallaron (${res.errors.first.error}).',
+          isError: true,
         );
       } else if (res.errors.isNotEmpty) {
-        _setStatus('Error al descargar: ${res.errors.first.error}', 'error');
+        _setStatus('Error al descargar: ${res.errors.first.error}', isError: true);
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('No se pudo descargar: ${res.errors.first.error}'),
-            backgroundColor: const Color(0xFFB91C1C),
-          ),
+          SnackBar(content: Text('Error: ${res.errors.first.error}')),
         );
       }
     } on StoragePermissionException catch (e) {
-      _setStatus(e.message, 'error');
+      _setStatus(e.message, isError: true);
       await _requestPermissionNow();
     } on SessionExpiredException catch (e) {
-      _setStatus(e.message, 'error');
+      _setStatus(e.message, isError: true);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(e.message), backgroundColor: const Color(0xFFB91C1C)),
-        );
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.message)));
       }
     } catch (e) {
-      _setStatus('Error inesperado al descargar: $e', 'error');
+      _setStatus('Error inesperado al descargar: $e', isError: true);
     } finally {
       if (mounted) {
         setState(() {
@@ -432,1028 +419,1696 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
   }
 
   List<MoodleItem> _filteredItems(MoodleCourse course) {
+    final q = _searchQuery.trim().toLowerCase();
+    final courseNameMatches = q.isEmpty ||
+        course.cleanName.toLowerCase().contains(q) ||
+        course.obsidianFolder.toLowerCase().contains(q);
+
     return course.items.where((item) {
-      switch (_filter) {
-        case ResourceFilter.files:
-          return item.downloadable;
-        case ResourceFilter.pending:
-          return item.downloadable && !item.isDownloaded;
-        case ResourceFilter.all:
-          return true;
-      }
+      final passesFilter = switch (_filter) {
+        ResourceFilter.files => item.downloadable,
+        ResourceFilter.pending => item.downloadable && !item.isDownloaded,
+        ResourceFilter.all => true,
+      };
+      if (!passesFilter) return false;
+      if (q.isEmpty || courseNameMatches) return true;
+      return item.title.toLowerCase().contains(q) ||
+          item.section.toLowerCase().contains(q) ||
+          item.fileName.toLowerCase().contains(q);
     }).toList();
+  }
+
+  List<MoodleCourse> get _visibleCourses {
+    final q = _searchQuery.trim().toLowerCase();
+    if (q.isEmpty) return _courses;
+    return _courses.where((c) {
+      if (c.cleanName.toLowerCase().contains(q) ||
+          c.obsidianFolder.toLowerCase().contains(q)) {
+        return true;
+      }
+      return c.items.any((i) =>
+          i.title.toLowerCase().contains(q) || i.section.toLowerCase().contains(q));
+    }).toList();
+  }
+
+  Future<void> _openCourseConfigSheet(MoodleCourse course) async {
+    final folderCtrl = TextEditingController(text: course.obsidianFolder);
+    final subCtrl = TextEditingController(text: course.targetSubfolder);
+    bool orgBySection = course.organizeBySection;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheetState) {
+          final cs = Theme.of(ctx).colorScheme;
+          final tt = Theme.of(ctx).textTheme;
+          final keyboardInset = MediaQuery.of(ctx).viewInsets.bottom;
+
+          return Padding(
+            padding: EdgeInsets.fromLTRB(20, 4, 20, 20 + keyboardInset),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: cs.primaryContainer,
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                        child: Icon(Icons.folder_special_rounded,
+                            color: cs.onPrimaryContainer),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Carpeta del ramo',
+                              style: tt.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+                            ),
+                            Text(
+                              course.cleanName,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: tt.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 18),
+                  TextField(
+                    controller: folderCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Carpeta principal del ramo',
+                      hintText: 'Ej: Ingeniería de Software',
+                      prefixIcon: Icon(Icons.folder_outlined),
+                    ),
+                  ),
+                  if (_existingSubfolders.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      'Carpetas existentes en destino:',
+                      style: tt.labelMedium?.copyWith(color: cs.onSurfaceVariant),
+                    ),
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 6,
+                      children: _existingSubfolders
+                          .take(12)
+                          .map((folder) => ActionChip(
+                                label: Text(folder),
+                                onPressed: () {
+                                  folderCtrl.text = folder;
+                                  setSheetState(() {});
+                                },
+                              ))
+                          .toList(),
+                    ),
+                  ],
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: subCtrl,
+                    decoration: const InputDecoration(
+                      labelText: 'Subcarpeta fija (opcional)',
+                      hintText: 'Ej: Aula (dejar vacío para guardar directo)',
+                      prefixIcon: Icon(Icons.subdirectory_arrow_right_rounded),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  SwitchListTile.adaptive(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                    title: const Text('Subcarpeta por sección'),
+                    subtitle: const Text('Agrupa cada archivo según la pestaña/unidad de Aula'),
+                    value: orgBySection,
+                    onChanged: (v) => setSheetState(() => orgBySection = v),
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          onPressed: () => Navigator.of(ctx).pop(),
+                          child: const Text('Cancelar'),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        flex: 2,
+                        child: FilledButton.icon(
+                          onPressed: () async {
+                            final f = folderCtrl.text.trim();
+                            final sub = subCtrl.text.trim();
+                            if (f.isNotEmpty) {
+                              course.obsidianFolder = f;
+                              await widget.settingsService.setCourseFolder(course.id, f);
+                            }
+                            course.targetSubfolder = sub;
+                            await widget.settingsService.setCourseSubfolder(course.id, sub);
+                            course.organizeBySection = orgBySection;
+                            await widget.settingsService
+                                .setCourseOrganizeBySection(course.id, orgBySection);
+
+                            await widget.moodleService.enrichItemsWithLocalStatus(
+                              course.items,
+                              course.obsidianFolder,
+                            );
+                            if (ctx.mounted) Navigator.of(ctx).pop();
+                            if (mounted) setState(() {});
+                          },
+                          icon: const Icon(Icons.check_rounded),
+                          label: const Text('Guardar cambios'),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+
+    folderCtrl.dispose();
+    subCtrl.dispose();
+  }
+
+  Future<void> _openAccountSettingsSheet() async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (ctx) => ListenableBuilder(
+        listenable: widget.settingsService.themeNotifier,
+        builder: (ctx, _) {
+          final cs = Theme.of(ctx).colorScheme;
+          final tt = Theme.of(ctx).textTheme;
+          final authLabel = widget.moodleService.isTokenAuth
+              ? 'Conectado por Token (wstoken)'
+              : 'Conectado por Sesión WebView / Cookie';
+
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // Cabecera usuario
+                  Card(
+                    color: cs.surfaceContainerHigh,
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Row(
+                        children: [
+                          CircleAvatar(
+                            radius: 22,
+                            backgroundColor: cs.primaryContainer,
+                            child: Icon(Icons.person_rounded, color: cs.onPrimaryContainer),
+                          ),
+                          const SizedBox(width: 14),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  widget.moodleService.userName ?? 'Usuario Aula USM',
+                                  style: tt.titleSmall?.copyWith(fontWeight: FontWeight.w600),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  authLabel,
+                                  style: tt.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Container(
+                            width: 10,
+                            height: 10,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: widget.moodleService.isAuthenticated
+                                  ? Colors.greenAccent.shade400
+                                  : cs.error,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+
+                  Text(
+                    'Sesión de Aula USM',
+                    style: tt.labelLarge?.copyWith(color: cs.primary),
+                  ),
+                  const SizedBox(height: 8),
+                  Card(
+                    color: cs.surfaceContainerHigh,
+                    clipBehavior: Clip.antiAlias,
+                    child: Column(
+                      children: [
+                        ListTile(
+                          leading: const Icon(Icons.public_rounded),
+                          title: const Text('Cambiar sesión (Navegador)'),
+                          subtitle: const Text('Iniciar sesión con Microsoft 365'),
+                          onTap: () {
+                            Navigator.of(ctx).pop();
+                            _handleBrowserSwitch();
+                          },
+                        ),
+                        const Divider(height: 1, indent: 56),
+                        ListTile(
+                          leading: const Icon(Icons.key_rounded),
+                          title: const Text('Conectar con Token (wstoken)'),
+                          subtitle: const Text('Alternativa rápida sin navegador'),
+                          onTap: () {
+                            Navigator.of(ctx).pop();
+                            _handleTokenModal();
+                          },
+                        ),
+                        const Divider(height: 1, indent: 56),
+                        ListTile(
+                          leading: const Icon(Icons.cookie_outlined),
+                          title: const Text('Ingresar Cookie MoodleSession'),
+                          subtitle: const Text('Usar sesión activa copiada del navegador'),
+                          onTap: () {
+                            Navigator.of(ctx).pop();
+                            _handleCookieModal();
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 18),
+
+                  Text(
+                    'Apariencia Android',
+                    style: tt.labelLarge?.copyWith(color: cs.primary),
+                  ),
+                  const SizedBox(height: 8),
+                  SegmentedButton<ThemeMode>(
+                    showSelectedIcon: false,
+                    selected: {widget.settingsService.themeMode},
+                    onSelectionChanged: (sel) =>
+                        widget.settingsService.setThemeMode(sel.first),
+                    segments: const [
+                      ButtonSegment(
+                        value: ThemeMode.system,
+                        icon: Icon(Icons.brightness_auto_rounded, size: 17),
+                        label: Text('Sistema'),
+                      ),
+                      ButtonSegment(
+                        value: ThemeMode.dark,
+                        icon: Icon(Icons.dark_mode_rounded, size: 17),
+                        label: Text('Oscuro'),
+                      ),
+                      ButtonSegment(
+                        value: ThemeMode.light,
+                        icon: Icon(Icons.light_mode_rounded, size: 17),
+                        label: Text('Claro'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  SwitchListTile.adaptive(
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 6),
+                    secondary: const Icon(Icons.palette_outlined),
+                    title: const Text('Color dinámico (Material You)'),
+                    subtitle: const Text('Adapta la paleta a tu fondo de pantalla'),
+                    value: widget.settingsService.useDynamicColor,
+                    onChanged: (v) => widget.settingsService.setUseDynamicColor(v),
+                  ),
+                  const SizedBox(height: 16),
+
+                  FilledButton.tonalIcon(
+                    onPressed: () {
+                      Navigator.of(ctx).pop();
+                      _handleLogout();
+                    },
+                    icon: const Icon(Icons.logout_rounded),
+                    label: const Text('Cerrar sesión'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: cs.errorContainer,
+                      foregroundColor: cs.onErrorContainer,
+                      minimumSize: const Size.fromHeight(48),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  ({Color bg, Color fg}) _courseBadgeColors(ColorScheme cs, int index) {
+    return switch (index % 3) {
+      0 => (bg: cs.primaryContainer, fg: cs.onPrimaryContainer),
+      1 => (bg: cs.secondaryContainer, fg: cs.onSecondaryContainer),
+      _ => (bg: cs.tertiaryContainer, fg: cs.onTertiaryContainer),
+    };
   }
 
   @override
   Widget build(BuildContext context) {
     final queue = _selectedQueue;
-    final selectedBytesStr = MoodleItem.formatFileSize(_selectedTotalBytes);
 
-    return Scaffold(
-      backgroundColor: const Color(0xFF0F0F12),
-      appBar: AppBar(
-        backgroundColor: const Color(0xFF17171C),
-        elevation: 0,
-        titleSpacing: 12,
-        title: Row(
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(6),
-              child: Image.asset(
-                'assets/logo.png',
-                width: 24,
-                height: 24,
-                errorBuilder: (_, _, _) =>
-                    const Icon(Icons.layers, size: 20, color: Color(0xFF38BDF8)),
-              ),
-            ),
-            const SizedBox(width: 8),
-            const Text(
-              'Aula-Scrapt',
-              style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: Color(0xFFF3F4F6)),
-            ),
-            const SizedBox(width: 8),
-            Flexible(
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(4),
-                  border: Border.all(
-                    color: widget.moodleService.isAuthenticated
-                        ? const Color(0x7322C55E)
-                        : const Color(0x73EF4444),
-                  ),
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final isWide = constraints.maxWidth >= 720;
+
+        return Scaffold(
+          appBar: isWide ? _buildTopAppBar(context) : null,
+          body: Stack(
+            children: [
+              if (isWide)
+                _buildWideAdaptiveBody(context, queue)
+              else
+                _buildPhoneBody(context, queue),
+
+              // Dock flotante edge-to-edge en alcance del pulgar (se oculta al escribir en búsqueda)
+              if (MediaQuery.viewInsetsOf(context).bottom < 50)
+                Align(
+                  alignment: Alignment.bottomCenter,
+                  child: _buildFloatingBottomDock(context, queue),
                 ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  PreferredSizeWidget _buildTopAppBar(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    final displayUser = widget.moodleService.userName ?? 'Conectado';
+    final shortUser = displayUser.split(' ').take(2).join(' ');
+
+    return AppBar(
+      titleSpacing: 16,
+      title: Row(
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: Image.asset(
+              'assets/logo.png',
+              width: 30,
+              height: 30,
+              errorBuilder: (_, _, _) => Icon(Icons.layers_rounded, color: cs.primary),
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Aula-Scrapt',
+                  style: tt.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+                ),
+                Row(
                   children: [
                     Container(
-                      width: 6,
-                      height: 6,
+                      width: 7,
+                      height: 7,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
                         color: widget.moodleService.isAuthenticated
-                            ? const Color(0xFF22C55E)
-                            : const Color(0xFFEF4444),
+                            ? Colors.greenAccent.shade400
+                            : cs.error,
                       ),
                     ),
                     const SizedBox(width: 5),
                     Flexible(
                       child: Text(
-                        widget.moodleService.userName ?? 'Conectado',
+                        shortUser,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(fontSize: 11, color: Color(0xFFF3F4F6)),
+                        style: tt.labelSmall?.copyWith(color: cs.onSurfaceVariant),
                       ),
                     ),
                   ],
                 ),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          PopupMenuButton<String>(
-            icon: const Icon(Icons.manage_accounts_outlined, color: Color(0xFFF3F4F6), size: 21),
-            tooltip: 'Opciones de sesión',
-            color: const Color(0xFF17171C),
-            onSelected: (value) {
-              if (value == 'browser') _handleBrowserSwitch();
-              if (value == 'token') _handleTokenModal();
-              if (value == 'cookie') _handleCookieModal();
-              if (value == 'logout') _handleLogout();
-            },
-            itemBuilder: (_) => const [
-              PopupMenuItem(
-                value: 'browser',
-                child: Text('Cambiar sesión (WebView)', style: TextStyle(color: Color(0xFFF3F4F6))),
-              ),
-              PopupMenuItem(
-                value: 'token',
-                child: Text('Conectar con Token (wstoken)', style: TextStyle(color: Color(0xFFF3F4F6))),
-              ),
-              PopupMenuItem(
-                value: 'cookie',
-                child: Text('Ingresar Cookie MoodleSession', style: TextStyle(color: Color(0xFFF3F4F6))),
-              ),
-              PopupMenuDivider(),
-              PopupMenuItem(
-                value: 'logout',
-                child: Text('Salir / Cerrar sesión', style: TextStyle(color: Color(0xFFF87171))),
-              ),
-            ],
-          ),
-        ],
-      ),
-      body: Column(
-        children: [
-          // Barra de accesos rápidos de sesión (paridad topbar .exe: WebView / Token / Cookie / Salir)
-          Container(
-            width: double.infinity,
-            color: const Color(0xFF17171C),
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-                children: [
-                  _TopActionButton(label: 'Cambiar sesión', onTap: _handleBrowserSwitch),
-                  const SizedBox(width: 6),
-                  _TopActionButton(label: 'Token', onTap: _handleTokenModal),
-                  const SizedBox(width: 6),
-                  _TopActionButton(label: 'Cookie', onTap: _handleCookieModal),
-                  const SizedBox(width: 6),
-                  _TopActionButton(
-                    label: 'Salir',
-                    isDanger: true,
-                    onTap: _handleLogout,
-                  ),
-                ],
-              ),
-            ),
-          ),
-
-          // Aviso de permiso de almacenamiento si falta
-          if (!_hasStoragePermission && Platform.isAndroid)
-            Container(
-              width: double.infinity,
-              color: const Color(0x2EEAB308),
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-              child: Row(
-                children: [
-                  const Icon(Icons.warning_amber_rounded, size: 16, color: Color(0xFFFACC15)),
-                  const SizedBox(width: 8),
-                  const Expanded(
-                    child: Text(
-                      'Falta permiso de almacenamiento para descargar en tu carpeta.',
-                      style: TextStyle(color: Color(0xFFFDE047), fontSize: 11.5),
-                    ),
-                  ),
-                  TextButton(
-                    style: TextButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      minimumSize: Size.zero,
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                      backgroundColor: const Color(0xFFFACC15),
-                      foregroundColor: const Color(0xFF0F0F12),
-                    ),
-                    onPressed: _requestPermissionNow,
-                    child: const Text('Conceder permiso',
-                        style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600)),
-                  ),
-                ],
-              ),
-            ),
-
-          // Barra de carpeta destino + controles globales (igual a .control-bar en .exe)
-          Container(
-            width: double.infinity,
-            decoration: const BoxDecoration(
-              color: Color(0xFF17171C),
-              border: Border(
-                top: BorderSide(color: Color(0xFF2A2A33)),
-                bottom: BorderSide(color: Color(0xFF2A2A33)),
-              ),
-            ),
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 10),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                // Selector de ruta Guardar en
-                Row(
-                  children: [
-                    const Text(
-                      'Guardar en:',
-                      style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 11.5),
-                    ),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: GestureDetector(
-                        onTap: _pickFolder,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF0F0F12),
-                            borderRadius: BorderRadius.circular(5),
-                            border: Border.all(color: const Color(0xFF2A2A33)),
-                          ),
-                          child: Text(
-                            widget.settingsService.downloadRoot,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(color: Color(0xFFF3F4F6), fontSize: 11.5),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    OutlinedButton(
-                      onPressed: _pickFolder,
-                      style: OutlinedButton.styleFrom(
-                        side: const BorderSide(color: Color(0xFF2A2A33)),
-                        foregroundColor: const Color(0xFFF3F4F6),
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                        minimumSize: Size.zero,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(5)),
-                      ),
-                      child: const Text('Elegir carpeta...', style: TextStyle(fontSize: 11.5)),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-
-                // Estadísticas y Botón Actualizar cursos
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        '${_courses.length} ramos | $_totalFilesCount archivos ($_totalPendingCount pendientes)',
-                        style: const TextStyle(color: Color(0xFF9CA3AF), fontSize: 12),
-                      ),
-                    ),
-                    ElevatedButton(
-                      onPressed: _isScanning ? null : _scanAula,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(0xFFF3F4F6),
-                        foregroundColor: const Color(0xFF0F0F12),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                        minimumSize: Size.zero,
-                        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(5)),
-                      ),
-                      child: Text(
-                        _isScanning ? 'Cargando...' : 'Actualizar cursos',
-                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
-                      ),
-                    ),
-                  ],
-                ),
-
-                if (_courses.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  // Pestañas de filtro por categoría + Marcar pendientes / Limpiar
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Container(
-                          padding: const EdgeInsets.all(2),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF0F0F12),
-                            borderRadius: BorderRadius.circular(5),
-                            border: Border.all(color: const Color(0xFF2A2A33)),
-                          ),
-                          child: Row(
-                            children: [
-                              _FilterTabBtn(
-                                label: 'Archivos',
-                                active: _filter == ResourceFilter.files,
-                                onTap: () => setState(() => _filter = ResourceFilter.files),
-                              ),
-                              _FilterTabBtn(
-                                label: 'Pendientes',
-                                active: _filter == ResourceFilter.pending,
-                                onTap: () => setState(() => _filter = ResourceFilter.pending),
-                              ),
-                              _FilterTabBtn(
-                                label: 'Todo',
-                                active: _filter == ResourceFilter.all,
-                                onTap: () => setState(() => _filter = ResourceFilter.all),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 6),
-                      _TopActionButton(
-                        label: 'Marcar pend.',
-                        onTap: _selectAllPending,
-                      ),
-                      const SizedBox(width: 4),
-                      _TopActionButton(
-                        label: 'Limpiar',
-                        onTap: _clearSelection,
-                      ),
-                    ],
-                  ),
-                ],
               ],
             ),
           ),
-
-          // Status Banner compacto
-          Container(
-            width: double.infinity,
-            color: const Color(0xFF1E1E24),
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-            child: Text(
-              _statusMessage,
-              style: TextStyle(color: _statusColor, fontSize: 11.5),
-            ),
-          ),
-
-          // Lista principal de cursos
-          Expanded(
-            child: _isScanning && _courses.isEmpty
-                ? const Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        CircularProgressIndicator(color: Color(0xFF38BDF8)),
-                        SizedBox(height: 14),
-                        Text(
-                          'Consultando cursos en Aula USM...',
-                          style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 13),
-                        ),
-                      ],
-                    ),
-                  )
-                : _courses.isEmpty
-                    ? Center(
-                        child: Padding(
-                          padding: const EdgeInsets.all(24),
-                          child: Column(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              const Text(
-                                'No se encontraron cursos activos o falló la carga.',
-                                textAlign: TextAlign.center,
-                                style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 13),
-                              ),
-                              const SizedBox(height: 12),
-                              ElevatedButton(
-                                onPressed: _scanAula,
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: const Color(0xFFF3F4F6),
-                                  foregroundColor: const Color(0xFF0F0F12),
-                                ),
-                                child: const Text('Actualizar cursos'),
-                              ),
-                            ],
-                          ),
-                        ),
-                      )
-                    : ListView.builder(
-                        padding: EdgeInsets.fromLTRB(
-                          12,
-                          12,
-                          12,
-                          queue.isNotEmpty || _isDownloading ? 130 : 24,
-                        ),
-                        itemCount: _courses.length,
-                        itemBuilder: (context, index) =>
-                            _buildCourseCard(_courses[index]),
-                      ),
-          ),
         ],
       ),
+      actions: [
+        IconButton(
+          tooltip: 'Actualizar cursos',
+          onPressed: _isScanning ? null : _scanAula,
+          icon: _isScanning
+              ? const SizedBox(
+                  width: 20,
+                  height: 20,
+                  child: CircularProgressIndicator(strokeWidth: 2.4),
+                )
+              : const Icon(Icons.refresh_rounded),
+        ),
+        Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: IconButton.filledTonal(
+            tooltip: 'Cuenta y apariencia',
+            onPressed: _openAccountSettingsSheet,
+            icon: const Icon(Icons.tune_rounded),
+          ),
+        ),
+      ],
+    );
+  }
 
-      // Barra fija inferior de descarga
-      bottomSheet: queue.isNotEmpty || _isDownloading
-          ? Container(
-              width: double.infinity,
-              padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-              decoration: const BoxDecoration(
-                color: Color(0xFF17171C),
-                border: Border(top: BorderSide(color: Color(0xFF2A2A33))),
-              ),
-              child: SafeArea(
-                top: false,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (_isDownloading) ...[
+  Widget _buildPhoneBody(
+    BuildContext context,
+    List<({MoodleCourse course, MoodleItem item})> queue,
+  ) {
+    final cs = Theme.of(context).colorScheme;
+    final visibleCourses = _visibleCourses;
+    final hasDock = queue.isNotEmpty || _isDownloading;
+
+    return RefreshIndicator(
+      onRefresh: _scanAula,
+      edgeOffset: MediaQuery.of(context).padding.top + kToolbarHeight,
+      child: CustomScrollView(
+        physics: const AlwaysScrollableScrollPhysics(),
+        slivers: [
+          SliverAppBar(
+            floating: true,
+            snap: true,
+            pinned: false,
+            titleSpacing: 16,
+            surfaceTintColor: cs.surfaceTint,
+            title: Row(
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: Image.asset(
+                    'assets/logo.png',
+                    width: 30,
+                    height: 30,
+                    errorBuilder: (_, _, _) =>
+                        Icon(Icons.layers_rounded, color: cs.primary),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        'Aula-Scrapt',
+                        style: Theme.of(context)
+                            .textTheme
+                            .titleMedium
+                            ?.copyWith(fontWeight: FontWeight.w700),
+                      ),
                       Row(
-                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
                         children: [
-                          Expanded(
-                            child: Text(
-                              '$_downloadingStage: $_downloadingFile',
-                              style: const TextStyle(color: Color(0xFF38BDF8), fontSize: 12),
-                              overflow: TextOverflow.ellipsis,
+                          Container(
+                            width: 7,
+                            height: 7,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: widget.moodleService.isAuthenticated
+                                  ? Colors.greenAccent.shade400
+                                  : cs.error,
                             ),
                           ),
-                          const SizedBox(width: 8),
-                          Text(
-                            '$_downloadCurrent / $_downloadTotal',
-                            style: const TextStyle(color: Color(0xFF9CA3AF), fontSize: 12),
+                          const SizedBox(width: 5),
+                          Flexible(
+                            child: Text(
+                              (widget.moodleService.userName ?? 'Conectado')
+                                  .split(' ')
+                                  .take(2)
+                                  .join(' '),
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .labelSmall
+                                  ?.copyWith(color: cs.onSurfaceVariant),
+                            ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 6),
-                      LinearProgressIndicator(
-                        value: _downloadTotal > 0 ? _downloadCurrent / _downloadTotal : 0,
-                        backgroundColor: const Color(0xFF0F0F12),
-                        color: const Color(0xFF22C55E),
-                      ),
-                      const SizedBox(height: 10),
                     ],
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            '${queue.length} archivo(s) seleccionado(s)${selectedBytesStr.isNotEmpty ? ' • $selectedBytesStr' : ''}',
-                            style: const TextStyle(
-                              color: Color(0xFFF3F4F6),
-                              fontWeight: FontWeight.w600,
-                              fontSize: 12.5,
-                            ),
-                          ),
-                        ),
-                        ElevatedButton(
-                          onPressed: _isDownloading ? null : _startDownload,
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFFF3F4F6),
-                            foregroundColor: const Color(0xFF0F0F12),
-                            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6)),
-                          ),
-                          child: Text(
-                            _isDownloading ? 'Descargando...' : 'Descargar seleccionados',
-                            style: const TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600),
-                          ),
-                        ),
-                      ],
-                    ),
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              IconButton(
+                tooltip: 'Actualizar cursos',
+                onPressed: _isScanning ? null : _scanAula,
+                icon: _isScanning
+                    ? const SizedBox(
+                        width: 20,
+                        height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2.4),
+                      )
+                    : const Icon(Icons.refresh_rounded),
+              ),
+              Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: IconButton.filledTonal(
+                  tooltip: 'Cuenta y apariencia',
+                  onPressed: _openAccountSettingsSheet,
+                  icon: const Icon(Icons.tune_rounded),
+                ),
+              ),
+            ],
+          ),
+
+          SliverPadding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+            sliver: SliverToBoxAdapter(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  if (!_hasStoragePermission && Platform.isAndroid) ...[
+                    _buildPermissionBanner(context),
+                    const SizedBox(height: 12),
+                  ],
+                  _buildDestinationSummaryCard(context),
+                  if (_courses.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    _buildSearchAndFilters(context, queue),
+                  ],
+                  if (_statusMessage != null) ...[
+                    const SizedBox(height: 10),
+                    _buildStatusPill(context),
+                  ],
+                ],
+              ),
+            ),
+          ),
+
+          if (_isScanning && _courses.isEmpty)
+            const SliverFillRemaining(
+              hasScrollBody: false,
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircularProgressIndicator(),
+                    SizedBox(height: 16),
+                    Text('Consultando cursos en Aula USM...'),
                   ],
                 ),
               ),
             )
-          : null,
+          else if (visibleCourses.isEmpty)
+            SliverFillRemaining(
+              hasScrollBody: false,
+              child: _buildEmptyCoursesState(context),
+            )
+          else
+            SliverPadding(
+              padding: EdgeInsets.fromLTRB(
+                16,
+                4,
+                16,
+                MediaQuery.of(context).padding.bottom + (hasDock ? 116 : 28),
+              ),
+              sliver: SliverList.separated(
+                itemCount: visibleCourses.length,
+                separatorBuilder: (_, _) => const SizedBox(height: 12),
+                itemBuilder: (context, idx) =>
+                    _buildExpressiveCourseCard(context, visibleCourses[idx], idx),
+              ),
+            ),
+        ],
+      ),
     );
   }
 
-  Widget _buildCourseCard(MoodleCourse course) {
-    final isExpanded = _expandedCourses.contains(course.id);
-    final filtered = _filteredItems(course);
+  Widget _buildWideAdaptiveBody(
+    BuildContext context,
+    List<({MoodleCourse course, MoodleItem item})> queue,
+  ) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    final visibleCourses = _visibleCourses;
+    final MoodleCourse? selectedCourse = visibleCourses.isEmpty
+        ? null
+        : visibleCourses.firstWhere(
+            (c) => c.id == _activeWideCourseId,
+            orElse: () => visibleCourses.first,
+          );
 
-    // Agrupar ítems filtrados por sección / categoría
-    final Map<String, List<MoodleItem>> sectionsMap = {};
-    for (final item in filtered) {
-      final sec = item.section.isEmpty ? 'General' : item.section;
-      sectionsMap.putIfAbsent(sec, () => []).add(item);
-    }
+    return SafeArea(
+      top: false,
+      bottom: false,
+      child: Row(
+        children: [
+            // Panel izquierdo: Resumen + Buscador + Lista de ramos
+            SizedBox(
+              width: 360,
+              child: RefreshIndicator(
+                onRefresh: _scanAula,
+                child: ListView(
+                  padding: EdgeInsets.fromLTRB(
+                    16,
+                    8,
+                    12,
+                    MediaQuery.of(context).padding.bottom + 100,
+                  ),
+                  children: [
+                    if (!_hasStoragePermission && Platform.isAndroid) ...[
+                      _buildPermissionBanner(context),
+                      const SizedBox(height: 12),
+                    ],
+                    _buildDestinationSummaryCard(context),
+                    const SizedBox(height: 12),
+                    _buildSearchBar(context),
+                    if (_statusMessage != null) ...[
+                      const SizedBox(height: 10),
+                      _buildStatusPill(context),
+                    ],
+                    const SizedBox(height: 12),
+                    for (var i = 0; i < visibleCourses.length; i++)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: _buildWideCourseTile(
+                          context,
+                          visibleCourses[i],
+                          i,
+                          selectedCourse?.id == visibleCourses[i].id,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
 
-    final pendingCount = course.newFilesCount;
-    final totalCount = course.downloadableCount;
+            VerticalDivider(width: 1, color: cs.outlineVariant.withValues(alpha: 0.4)),
 
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      decoration: BoxDecoration(
-        color: const Color(0xFF17171C),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: const Color(0xFF2A2A33)),
+            // Panel derecho: Detalle del ramo activo
+            Expanded(
+              child: selectedCourse == null
+                  ? Center(
+                      child: _isScanning
+                          ? const CircularProgressIndicator()
+                          : Text(
+                              'Selecciona un ramo para explorar su material.',
+                              style: tt.bodyMedium?.copyWith(color: cs.onSurfaceVariant),
+                            ),
+                    )
+                  : ListView(
+                      padding: EdgeInsets.fromLTRB(
+                        20,
+                        12,
+                        20,
+                        MediaQuery.of(context).padding.bottom +
+                            (queue.isNotEmpty || _isDownloading ? 120 : 32),
+                      ),
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    selectedCourse.cleanName,
+                                    style: tt.headlineSmall?.copyWith(
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    '${selectedCourse.downloadableCount} archivos • ${selectedCourse.newFilesCount} pendientes',
+                                    style: tt.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            ActionChip(
+                              avatar: const Icon(Icons.folder_outlined, size: 17),
+                              label: Text(selectedCourse.obsidianFolder),
+                              onPressed: () => _openCourseConfigSheet(selectedCourse),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 14),
+                        _buildFilterAndBulkRow(context, queue, courseOnly: selectedCourse),
+                        const SizedBox(height: 16),
+                        _buildSectionsList(context, selectedCourse),
+                      ],
+                    ),
+            ),
+          ],
       ),
+    );
+  }
+
+  Widget _buildWideCourseTile(
+    BuildContext context,
+    MoodleCourse course,
+    int index,
+    bool isSelected,
+  ) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    final colors = _courseBadgeColors(cs, index);
+    final pending = course.newFilesCount;
+
+    return Card(
+      color: isSelected ? cs.primaryContainer : cs.surfaceContainerLow,
+      clipBehavior: Clip.antiAlias,
+      child: ListTile(
+        onTap: () => setState(() => _activeWideCourseId = course.id),
+        leading: Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: isSelected ? cs.primary : colors.bg,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: course.isLoadingContents
+              ? Padding(
+                  padding: const EdgeInsets.all(10),
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: isSelected ? cs.onPrimary : colors.fg,
+                  ),
+                )
+              : Icon(
+                  Icons.menu_book_rounded,
+                  size: 20,
+                  color: isSelected ? cs.onPrimary : colors.fg,
+                ),
+        ),
+        title: Text(
+          course.cleanName,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: tt.titleSmall?.copyWith(
+            fontWeight: FontWeight.w600,
+            color: isSelected ? cs.onPrimaryContainer : cs.onSurface,
+          ),
+        ),
+        subtitle: Text(
+          '${course.downloadableCount} archivos • $pending pend.',
+          style: tt.labelSmall?.copyWith(
+            color: isSelected
+                ? cs.onPrimaryContainer.withValues(alpha: 0.8)
+                : cs.onSurfaceVariant,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPermissionBanner(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+
+    return Card(
+      color: cs.errorContainer,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Row(
+          children: [
+            Icon(Icons.folder_off_rounded, color: cs.onErrorContainer),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Permiso de almacenamiento requerido',
+                    style: tt.titleSmall?.copyWith(
+                      color: cs.onErrorContainer,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    'Actívalo para guardar PDFs y notas Obsidian en tu teléfono.',
+                    style: tt.bodySmall?.copyWith(color: cs.onErrorContainer),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            FilledButton(
+              onPressed: _requestPermissionNow,
+              style: FilledButton.styleFrom(
+                backgroundColor: cs.onErrorContainer,
+                foregroundColor: cs.errorContainer,
+                minimumSize: const Size(84, 40),
+              ),
+              child: const Text('Activar'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDestinationSummaryCard(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+
+    return Card(
+      color: cs.surfaceContainerHigh,
+      clipBehavior: Clip.antiAlias,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          // Cabecera de curso
+          InkWell(
+            onTap: _pickFolder,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 14, 14, 12),
+              child: Row(
+                children: [
+                  Container(
+                    width: 44,
+                    height: 44,
+                    decoration: BoxDecoration(
+                      color: cs.primaryContainer,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Icon(Icons.folder_copy_rounded, color: cs.onPrimaryContainer),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Guardar descargas en',
+                          style: tt.labelSmall?.copyWith(color: cs.onSurfaceVariant),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          widget.settingsService.shortDownloadRoot,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: tt.titleSmall?.copyWith(fontWeight: FontWeight.w600),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton.tonalIcon(
+                    onPressed: _pickFolder,
+                    icon: const Icon(Icons.edit_location_alt_outlined, size: 18),
+                    label: const Text('Elegir'),
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(84, 40),
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_courses.isNotEmpty) ...[
+            Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.35)),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: [
+                  _MetricBadge(
+                    icon: Icons.school_outlined,
+                    label: '${_courses.length} ramos',
+                    bg: cs.surfaceContainerHighest,
+                    fg: cs.onSurface,
+                  ),
+                  _MetricBadge(
+                    icon: Icons.insert_drive_file_outlined,
+                    label: '$_totalFilesCount archivos',
+                    bg: cs.secondaryContainer,
+                    fg: cs.onSecondaryContainer,
+                  ),
+                  _MetricBadge(
+                    icon: Icons.download_for_offline_outlined,
+                    label: '$_totalPendingCount pendientes',
+                    bg: _totalPendingCount > 0
+                        ? cs.tertiaryContainer
+                        : cs.surfaceContainerHighest,
+                    fg: _totalPendingCount > 0
+                        ? cs.onTertiaryContainer
+                        : cs.onSurfaceVariant,
+                  ),
+                ],
+              ),
+            ),
+          ],
+          if (_isScanning) const LinearProgressIndicator(minHeight: 3),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSearchBar(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return TextField(
+      controller: _searchCtrl,
+      onChanged: (v) => setState(() => _searchQuery = v),
+      decoration: InputDecoration(
+        hintText: 'Buscar ramo, sección o archivo...',
+        prefixIcon: const Icon(Icons.search_rounded),
+        suffixIcon: _searchQuery.isNotEmpty
+            ? IconButton(
+                icon: const Icon(Icons.close_rounded),
+                onPressed: () {
+                  _searchCtrl.clear();
+                  setState(() => _searchQuery = '');
+                },
+              )
+            : null,
+        filled: true,
+        fillColor: cs.surfaceContainerHigh,
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(999),
+          borderSide: BorderSide.none,
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(999),
+          borderSide: BorderSide.none,
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(999),
+          borderSide: BorderSide(color: cs.primary, width: 1.5),
+        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      ),
+    );
+  }
+
+  Widget _buildSearchAndFilters(
+    BuildContext context,
+    List<({MoodleCourse course, MoodleItem item})> queue,
+  ) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _buildSearchBar(context),
+        const SizedBox(height: 10),
+        _buildFilterAndBulkRow(context, queue),
+      ],
+    );
+  }
+
+  Widget _buildFilterAndBulkRow(
+    BuildContext context,
+    List<({MoodleCourse course, MoodleItem item})> queue, {
+    MoodleCourse? courseOnly,
+  }) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SegmentedButton<ResourceFilter>(
+          showSelectedIcon: false,
+          selected: {_filter},
+          onSelectionChanged: (sel) => setState(() => _filter = sel.first),
+          segments: const [
+            ButtonSegment(
+              value: ResourceFilter.files,
+              icon: Icon(Icons.folder_zip_outlined, size: 17),
+              label: Text('Archivos', maxLines: 1, overflow: TextOverflow.ellipsis),
+            ),
+            ButtonSegment(
+              value: ResourceFilter.pending,
+              icon: Icon(Icons.new_releases_outlined, size: 17),
+              label: Text('Pendientes', maxLines: 1, overflow: TextOverflow.ellipsis),
+            ),
+            ButtonSegment(
+              value: ResourceFilter.all,
+              icon: Icon(Icons.list_alt_rounded, size: 17),
+              label: Text('Todo', maxLines: 1, overflow: TextOverflow.ellipsis),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              flex: 3,
+              child: FilledButton.tonalIcon(
+                onPressed: courseOnly != null
+                    ? () => _toggleCourseSelection(courseOnly, true)
+                    : (_totalPendingCount > 0 ? _selectAllPending : null),
+                icon: const Icon(Icons.done_all_rounded, size: 18),
+                label: Text(
+                  courseOnly != null ? 'Marcar ramo' : 'Marcar pendientes',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                style: FilledButton.styleFrom(minimumSize: const Size(0, 42)),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              flex: 2,
+              child: OutlinedButton.icon(
+                onPressed: queue.isNotEmpty
+                    ? (courseOnly != null
+                        ? () => _toggleCourseSelection(courseOnly, false)
+                        : _clearSelection)
+                    : null,
+                icon: const Icon(Icons.clear_all_rounded, size: 18),
+                label: const Text(
+                  'Limpiar',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                style: OutlinedButton.styleFrom(minimumSize: const Size(0, 42)),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStatusPill(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: _statusIsError ? cs.errorContainer : cs.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(16),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            _statusIsError ? Icons.error_outline_rounded : Icons.check_circle_outline_rounded,
+            size: 18,
+            color: _statusIsError ? cs.onErrorContainer : cs.primary,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              _statusMessage!,
+              style: tt.bodySmall?.copyWith(
+                color: _statusIsError ? cs.onErrorContainer : cs.onSurfaceVariant,
+              ),
+            ),
+          ),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            icon: const Icon(Icons.close_rounded, size: 16),
+            onPressed: () => setState(() => _statusMessage = null),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildEmptyCoursesState(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    final hasSearch = _searchQuery.trim().isNotEmpty;
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              hasSearch ? Icons.search_off_rounded : Icons.school_outlined,
+              size: 48,
+              color: cs.onSurfaceVariant,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              hasSearch
+                  ? 'Sin resultados para "$_searchQuery"'
+                  : 'No se encontraron ramos activos.',
+              textAlign: TextAlign.center,
+              style: tt.titleSmall,
+            ),
+            const SizedBox(height: 14),
+            FilledButton.tonalIcon(
+              onPressed: hasSearch
+                  ? () {
+                      _searchCtrl.clear();
+                      setState(() => _searchQuery = '');
+                    }
+                  : _scanAula,
+              icon: Icon(hasSearch ? Icons.clear_rounded : Icons.refresh_rounded),
+              label: Text(hasSearch ? 'Limpiar búsqueda' : 'Actualizar cursos'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildExpressiveCourseCard(
+    BuildContext context,
+    MoodleCourse course,
+    int index,
+  ) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    final isExpanded =
+        _expandedCourses.contains(course.id) || _searchQuery.trim().isNotEmpty;
+    final badgeColors = _courseBadgeColors(cs, index);
+    final pendingCount = course.newFilesCount;
+    final totalCount = course.downloadableCount;
+    final selectedInCourse =
+        course.items.where((i) => i.downloadable && i.isSelected).length;
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOutCubic,
+      decoration: BoxDecoration(
+        color: isExpanded ? cs.surfaceContainerHigh : cs.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(24),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
           InkWell(
             onTap: () {
               setState(() {
-                if (isExpanded) {
+                if (_expandedCourses.contains(course.id)) {
                   _expandedCourses.remove(course.id);
                 } else {
                   _expandedCourses.add(course.id);
                 }
               });
             },
-            borderRadius: BorderRadius.circular(8),
             child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              padding: const EdgeInsets.fromLTRB(16, 14, 14, 14),
+              child: Row(
                 children: [
-                  Row(
-                    children: [
-                      Icon(
-                        isExpanded ? Icons.arrow_drop_down : Icons.arrow_right,
-                        color: const Color(0xFF9CA3AF),
-                        size: 20,
-                      ),
-                      const SizedBox(width: 4),
-                      Expanded(
-                        child: Text(
-                          course.cleanName,
-                          style: const TextStyle(
-                            color: Color(0xFFF3F4F6),
-                            fontWeight: FontWeight.w600,
-                            fontSize: 13.5,
-                          ),
-                        ),
-                      ),
-                      if (course.isLoadingContents)
-                        const SizedBox(
-                          width: 14,
-                          height: 14,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Color(0xFF38BDF8),
-                          ),
-                        )
-                      else
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-                          decoration: BoxDecoration(
-                            color: pendingCount > 0
-                                ? const Color(0x1EEAB308)
-                                : const Color(0xFF0F0F12),
-                            borderRadius: BorderRadius.circular(4),
-                            border: Border.all(
-                              color: pendingCount > 0
-                                  ? const Color(0x73EAB308)
-                                  : const Color(0xFF2A2A33),
+                  Container(
+                    width: 46,
+                    height: 46,
+                    decoration: BoxDecoration(
+                      color: badgeColors.bg,
+                      borderRadius: BorderRadius.circular(15),
+                    ),
+                    child: course.isLoadingContents
+                        ? Padding(
+                            padding: const EdgeInsets.all(12),
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2.5,
+                              color: badgeColors.fg,
                             ),
-                          ),
-                          child: Text(
-                            '$totalCount archivos ($pendingCount pend.)',
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: pendingCount > 0
-                                  ? const Color(0xFFFACC15)
-                                  : const Color(0xFF9CA3AF),
-                            ),
-                          ),
-                        ),
-                    ],
+                          )
+                        : Icon(Icons.menu_book_rounded, color: badgeColors.fg),
                   ),
-                  const SizedBox(height: 5),
-                  Padding(
-                    padding: const EdgeInsets.only(left: 24),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          course.cleanName,
+                          style: tt.titleSmall?.copyWith(fontWeight: FontWeight.w600),
+                        ),
+                        const SizedBox(height: 3),
+                        Text(
+                          '${course.obsidianFolder}${selectedInCourse > 0 ? ' • $selectedInCourse selec.' : ''}',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: tt.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  if (!course.isLoadingContents)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF0F0F12),
-                        borderRadius: BorderRadius.circular(4),
-                        border: Border.all(color: const Color(0xFF2A2A33)),
+                        color: pendingCount > 0
+                            ? cs.tertiaryContainer
+                            : cs.surfaceContainerHighest,
+                        borderRadius: BorderRadius.circular(999),
                       ),
                       child: Text(
-                        course.obsidianFolder,
-                        style: const TextStyle(fontSize: 10.5, color: Color(0xFF9CA3AF)),
+                        pendingCount > 0 ? '$pendingCount pend.' : '$totalCount arch.',
+                        style: tt.labelSmall?.copyWith(
+                          fontWeight: FontWeight.w600,
+                          color: pendingCount > 0
+                              ? cs.onTertiaryContainer
+                              : cs.onSurfaceVariant,
+                        ),
                       ),
                     ),
+                  const SizedBox(width: 4),
+                  Icon(
+                    isExpanded
+                        ? Icons.keyboard_arrow_up_rounded
+                        : Icons.keyboard_arrow_down_rounded,
+                    color: cs.onSurfaceVariant,
                   ),
                 ],
               ),
             ),
           ),
 
-          // Cuerpo expandido del curso
-          if (isExpanded) ...[
-            const Divider(color: Color(0xFF2A2A33), height: 1),
-            // Barra de configuración de carpeta de este ramo
-            Container(
-              color: const Color(0xFF1E1E24),
-              padding: const EdgeInsets.all(10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    children: [
-                      const SizedBox(
-                        width: 92,
-                        child: Text(
-                          'Carpeta ramo:',
-                          style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 11.5),
-                        ),
-                      ),
-                      Expanded(
-                        child: TextField(
-                          controller: _folderCtrls[course.id],
-                          style: const TextStyle(color: Color(0xFFF3F4F6), fontSize: 12),
-                          onChanged: (val) async {
-                            final clean = val.trim();
-                            if (clean.isEmpty) return;
-                            course.obsidianFolder = clean;
-                            await widget.settingsService.setCourseFolder(course.id, clean);
-                          },
-                          decoration: InputDecoration(
-                            isDense: true,
-                            filled: true,
-                            fillColor: const Color(0xFF0F0F12),
-                            contentPadding:
-                                const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(5),
-                              borderSide: const BorderSide(color: Color(0xFF2A2A33)),
-                            ),
-                            enabledBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(5),
-                              borderSide: const BorderSide(color: Color(0xFF2A2A33)),
-                            ),
-                          ),
-                        ),
-                      ),
-                      if (_existingSubfolders.isNotEmpty)
-                        PopupMenuButton<String>(
-                          icon: const Icon(Icons.arrow_drop_down,
-                              color: Color(0xFF9CA3AF), size: 20),
-                          tooltip: 'Elegir carpeta existente',
-                          color: const Color(0xFF17171C),
-                          onSelected: (folder) async {
-                            _folderCtrls[course.id]?.text = folder;
-                            course.obsidianFolder = folder;
-                            await widget.settingsService.setCourseFolder(course.id, folder);
-                            await widget.moodleService.enrichItemsWithLocalStatus(
-                              course.items,
-                              course.obsidianFolder,
-                            );
-                            if (mounted) setState(() {});
-                          },
-                          itemBuilder: (_) => _existingSubfolders
-                              .map((f) => PopupMenuItem(
-                                    value: f,
-                                    child: Text(f,
-                                        style: const TextStyle(
-                                            color: Color(0xFFF3F4F6), fontSize: 12.5)),
-                                  ))
-                              .toList(),
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 6),
-                  Row(
-                    children: [
-                      const SizedBox(
-                        width: 92,
-                        child: Text(
-                          'Subcarpeta:',
-                          style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 11.5),
-                        ),
-                      ),
-                      SizedBox(
-                        width: 110,
-                        child: TextField(
-                          controller: _subfolderCtrls[course.id],
-                          style: const TextStyle(color: Color(0xFFF3F4F6), fontSize: 12),
-                          onChanged: (val) async {
-                            course.targetSubfolder = val.trim();
-                            await widget.settingsService
-                                .setCourseSubfolder(course.id, val.trim());
-                          },
-                          decoration: InputDecoration(
-                            isDense: true,
-                            hintText: 'Opcional',
-                            hintStyle: const TextStyle(color: Color(0xFF6B7280), fontSize: 11),
-                            filled: true,
-                            fillColor: const Color(0xFF0F0F12),
-                            contentPadding:
-                                const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(5),
-                              borderSide: const BorderSide(color: Color(0xFF2A2A33)),
-                            ),
-                            enabledBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(5),
-                              borderSide: const BorderSide(color: Color(0xFF2A2A33)),
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: InkWell(
-                          onTap: () async {
-                            final next = !course.organizeBySection;
-                            setState(() => course.organizeBySection = next);
-                            await widget.settingsService
-                                .setCourseOrganizeBySection(course.id, next);
-                          },
+          AnimatedSize(
+            duration: const Duration(milliseconds: 220),
+            curve: Curves.easeOutCubic,
+            child: !isExpanded
+                ? const SizedBox.shrink()
+                : Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 14),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.35)),
+                        const SizedBox(height: 10),
+                        // Barra de acciones rápidas del ramo (táctil y limpia)
+                        SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
                           child: Row(
                             children: [
-                              SizedBox(
-                                width: 22,
-                                height: 22,
-                                child: Checkbox(
-                                  value: course.organizeBySection,
-                                  activeColor: const Color(0xFF38BDF8),
-                                  onChanged: (v) async {
-                                    final next = v ?? true;
-                                    setState(() => course.organizeBySection = next);
-                                    await widget.settingsService
-                                        .setCourseOrganizeBySection(course.id, next);
-                                  },
+                              ActionChip(
+                                avatar: Icon(
+                                  Icons.folder_outlined,
+                                  size: 17,
+                                  color: cs.primary,
                                 ),
+                                label: Text(
+                                  course.targetSubfolder.isEmpty
+                                      ? 'Carpeta: ${course.obsidianFolder}'
+                                      : '${course.obsidianFolder}/${course.targetSubfolder}',
+                                ),
+                                onPressed: () => _openCourseConfigSheet(course),
                               ),
-                              const SizedBox(width: 4),
-                              const Flexible(
-                                child: Text(
-                                  'Subcarpeta por sección',
-                                  style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 11),
-                                ),
+                              const SizedBox(width: 8),
+                              ActionChip(
+                                avatar: const Icon(Icons.done_all_rounded, size: 17),
+                                label: const Text('Marcar todo'),
+                                onPressed: () => _toggleCourseSelection(course, true),
+                              ),
+                              const SizedBox(width: 8),
+                              ActionChip(
+                                avatar: const Icon(Icons.clear_all_rounded, size: 17),
+                                label: const Text('Desmarcar'),
+                                onPressed: () => _toggleCourseSelection(course, false),
                               ),
                             ],
                           ),
                         ),
-                      ),
-                    ],
+                        const SizedBox(height: 10),
+                        _buildSectionsList(context, course),
+                      ],
+                    ),
                   ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      _TopActionButton(
-                        label: 'Marcar ramo',
-                        onTap: () => _toggleCourseSelection(course, true),
-                      ),
-                      const SizedBox(width: 8),
-                      _TopActionButton(
-                        label: 'Desmarcar',
-                        onTap: () => _toggleCourseSelection(course, false),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
-            ),
-
-            // Contenido de secciones
-            if (course.scanError != null)
-              Padding(
-                padding: const EdgeInsets.all(12),
-                child: Text(
-                  'Error: ${course.scanError}',
-                  style: const TextStyle(color: Color(0xFFF87171), fontSize: 12),
-                ),
-              )
-            else if (sectionsMap.isEmpty)
-              const Padding(
-                padding: EdgeInsets.all(12),
-                child: Text(
-                  'Sin elementos para este filtro.',
-                  style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 12),
-                ),
-              )
-            else
-              Padding(
-                padding: const EdgeInsets.all(8),
-                child: Column(
-                  children: sectionsMap.entries.map((entry) {
-                    final secName = entry.key;
-                    final secItems = entry.value;
-                    final secKey = '${course.id}::$secName';
-                    final isSecExpanded = _expandedSections.contains(secKey);
-
-                    final downloadableInSec =
-                        secItems.where((i) => i.downloadable).toList();
-                    final allSecSelected = downloadableInSec.isNotEmpty &&
-                        downloadableInSec.every((i) => i.isSelected);
-
-                    return Container(
-                      margin: const EdgeInsets.only(bottom: 6),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF0F0F12),
-                        borderRadius: BorderRadius.circular(6),
-                        border: Border.all(color: const Color(0xFF2A2A33)),
-                      ),
-                      child: Column(
-                        children: [
-                          InkWell(
-                            onTap: () async {
-                              final opening = !isSecExpanded;
-                              setState(() {
-                                if (opening) {
-                                  _expandedSections.add(secKey);
-                                } else {
-                                  _expandedSections.remove(secKey);
-                                }
-                              });
-                              if (opening) {
-                                final updated = await widget.moodleService
-                                    .fetchMissingFileSizes(secItems);
-                                if (updated && mounted) setState(() {});
-                              }
-                            },
-                            borderRadius: BorderRadius.circular(6),
-                            child: Padding(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 8, vertical: 7),
-                              child: Row(
-                                children: [
-                                  Icon(
-                                    isSecExpanded
-                                        ? Icons.keyboard_arrow_down
-                                        : Icons.keyboard_arrow_right,
-                                    color: const Color(0xFF9CA3AF),
-                                    size: 18,
-                                  ),
-                                  if (downloadableInSec.isNotEmpty)
-                                    SizedBox(
-                                      width: 28,
-                                      height: 24,
-                                      child: Checkbox(
-                                        value: allSecSelected,
-                                        activeColor: const Color(0xFF22C55E),
-                                        onChanged: (v) => _toggleSectionSelection(
-                                            secItems, v ?? false),
-                                      ),
-                                    ),
-                                  Expanded(
-                                    child: Text(
-                                      secName,
-                                      style: const TextStyle(
-                                        color: Color(0xFFF3F4F6),
-                                        fontSize: 12.5,
-                                        fontWeight: FontWeight.w500,
-                                      ),
-                                    ),
-                                  ),
-                                  Text(
-                                    '${secItems.length} elem.',
-                                    style: const TextStyle(
-                                        color: Color(0xFF9CA3AF), fontSize: 11),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                          if (isSecExpanded) ...[
-                            const Divider(color: Color(0xFF2A2A33), height: 1),
-                            ...secItems.map((item) => _buildItemRow(item)),
-                          ],
-                        ],
-                      ),
-                    );
-                  }).toList(),
-                ),
-              ),
-          ],
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildItemRow(MoodleItem item) {
-    final sizeText = item.formattedSize;
+  Widget _buildSectionsList(BuildContext context, MoodleCourse course) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    final filtered = _filteredItems(course);
 
-    Color badgeColor;
-    Color badgeBorder;
-    String badgeText;
-    if (item.downloadable) {
-      if (item.isDownloaded) {
-        badgeColor = const Color(0xFF86EFAC);
-        badgeBorder = const Color(0x5922C55E);
-        badgeText = 'En carpeta';
-      } else {
-        badgeColor = const Color(0xFFFACC15);
-        badgeBorder = const Color(0x66EAB308);
-        badgeText = 'Pendiente';
-      }
-    } else {
-      badgeColor = const Color(0xFF9CA3AF);
-      badgeBorder = const Color(0xFF2A2A33);
-      badgeText = item.typeLabel;
+    if (course.scanError != null) {
+      return Card(
+        color: cs.errorContainer,
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Text(
+            'Error al leer este ramo: ${course.scanError}',
+            style: tt.bodySmall?.copyWith(color: cs.onErrorContainer),
+          ),
+        ),
+      );
     }
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: Color(0xFF1E1E24))),
-      ),
+    if (filtered.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 14),
+        child: Text(
+          'Sin elementos visibles con este filtro.',
+          textAlign: TextAlign.center,
+          style: tt.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+        ),
+      );
+    }
+
+    final Map<String, List<MoodleItem>> sectionsMap = {};
+    for (final item in filtered) {
+      final sec = item.section.isEmpty ? 'General' : item.section;
+      sectionsMap.putIfAbsent(sec, () => []).add(item);
+    }
+
+    return Column(
+      children: sectionsMap.entries.map((entry) {
+        final secName = entry.key;
+        final secItems = entry.value;
+        final secKey = '${course.id}::$secName';
+        final isSecExpanded =
+            _expandedSections.contains(secKey) || _searchQuery.trim().isNotEmpty;
+
+        final downloadableInSec = secItems.where((i) => i.downloadable).toList();
+        final allSecSelected = downloadableInSec.isNotEmpty &&
+            downloadableInSec.every((i) => i.isSelected);
+
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Material(
+            color: cs.surfaceContainerLowest,
+            borderRadius: BorderRadius.circular(18),
+            clipBehavior: Clip.antiAlias,
+            child: Column(
+              children: [
+                InkWell(
+                  onTap: () async {
+                    final opening = !_expandedSections.contains(secKey);
+                    setState(() {
+                      if (opening) {
+                        _expandedSections.add(secKey);
+                      } else {
+                        _expandedSections.remove(secKey);
+                      }
+                    });
+                    if (opening) {
+                      final updated =
+                          await widget.moodleService.fetchMissingFileSizes(secItems);
+                      if (updated && mounted) setState(() {});
+                    }
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+                    child: Row(
+                      children: [
+                        if (downloadableInSec.isNotEmpty)
+                          Checkbox(
+                            value: allSecSelected,
+                            onChanged: (v) =>
+                                _toggleSectionSelection(secItems, v ?? false),
+                          )
+                        else
+                          const SizedBox(width: 14),
+                        Expanded(
+                          child: Text(
+                            secName,
+                            style: tt.labelLarge?.copyWith(fontWeight: FontWeight.w600),
+                          ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                          decoration: BoxDecoration(
+                            color: cs.surfaceContainerHigh,
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                          child: Text(
+                            '${secItems.length}',
+                            style: tt.labelSmall?.copyWith(color: cs.onSurfaceVariant),
+                          ),
+                        ),
+                        const SizedBox(width: 4),
+                        Icon(
+                          isSecExpanded
+                              ? Icons.keyboard_arrow_up_rounded
+                              : Icons.keyboard_arrow_down_rounded,
+                          color: cs.onSurfaceVariant,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 6),
+                      ],
+                    ),
+                  ),
+                ),
+                if (isSecExpanded) ...[
+                  Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.3)),
+                  ...secItems.map((item) => _buildItemRow(context, item)),
+                ],
+              ],
+            ),
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  Widget _buildItemRow(BuildContext context, MoodleItem item) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    final sizeText = item.formattedSize;
+
+    Color statusBg;
+    Color statusFg;
+    String statusText;
+    if (item.downloadable) {
+      if (item.isDownloaded) {
+        statusBg = cs.secondaryContainer;
+        statusFg = cs.onSecondaryContainer;
+        statusText = 'En carpeta';
+      } else {
+        statusBg = cs.tertiaryContainer;
+        statusFg = cs.onTertiaryContainer;
+        statusText = 'Pendiente';
+      }
+    } else {
+      statusBg = cs.surfaceContainerHigh;
+      statusFg = cs.onSurfaceVariant;
+      statusText = item.typeLabel;
+    }
+
+    IconData nonFileIcon = switch (item.type) {
+      'assignment' => Icons.assignment_outlined,
+      'forum' => Icons.forum_outlined,
+      'page' => Icons.article_outlined,
+      _ => Icons.link_rounded,
+    };
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 4, 8, 4),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           if (item.downloadable)
-            SizedBox(
-              width: 28,
-              height: 24,
-              child: Checkbox(
-                value: item.isSelected,
-                activeColor: const Color(0xFF22C55E),
-                onChanged: (val) =>
-                    setState(() => item.isSelected = val ?? false),
-              ),
+            Checkbox(
+              value: item.isSelected,
+              onChanged: (val) => setState(() => item.isSelected = val ?? false),
             )
           else
-            const SizedBox(
-              width: 28,
-              child: Icon(Icons.link, size: 15, color: Color(0xFF6B7280)),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14),
+              child: Icon(nonFileIcon, size: 20, color: cs.onSurfaceVariant),
             ),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  item.title,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: Color(0xFFF3F4F6), fontSize: 12.5),
-                ),
-                const SizedBox(height: 3),
-                Wrap(
-                  spacing: 6,
-                  runSpacing: 4,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(12),
+              onTap: item.downloadable
+                  ? () => setState(() => item.isSelected = !item.isSelected)
+                  : () => _openItemUrl(item),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 2),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    if (sizeText.isNotEmpty)
-                      Container(
-                        padding:
-                            const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(3),
-                          border: Border.all(color: const Color(0xFF2A2A33)),
+                    Text(
+                      item.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: tt.bodyMedium?.copyWith(fontWeight: FontWeight.w500),
+                    ),
+                    const SizedBox(height: 5),
+                    Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      children: [
+                        Container(
+                          padding:
+                              const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: statusBg,
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                          child: Text(
+                            statusText,
+                            style: tt.labelSmall?.copyWith(
+                              color: statusFg,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
                         ),
+                        if (sizeText.isNotEmpty)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: cs.surfaceContainerHigh,
+                              borderRadius: BorderRadius.circular(999),
+                            ),
+                            child: Text(
+                              sizeText,
+                              style:
+                                  tt.labelSmall?.copyWith(color: cs.onSurfaceVariant),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+          IconButton.filledTonal(
+            tooltip: 'Abrir en Aula USM',
+            onPressed: () => _openItemUrl(item),
+            icon: const Icon(Icons.open_in_new_rounded, size: 18),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFloatingBottomDock(
+    BuildContext context,
+    List<({MoodleCourse course, MoodleItem item})> queue,
+  ) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+
+    if (queue.isEmpty && !_isDownloading) {
+      return const SizedBox.shrink();
+    }
+
+    final selectedBytesStr = MoodleItem.formatFileSize(_selectedTotalBytes);
+
+    return SafeArea(
+      top: false,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 0, 14, 12),
+        child: Material(
+          elevation: 6,
+          color: cs.surfaceContainerHighest,
+          borderRadius: BorderRadius.circular(28),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(18, 14, 14, 14),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (_isDownloading) ...[
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Expanded(
                         child: Text(
-                          sizeText,
-                          style: const TextStyle(
-                              color: Color(0xFF9CA3AF), fontSize: 10),
+                          '$_downloadingStage: $_downloadingFile',
+                          style: tt.labelMedium?.copyWith(
+                            color: cs.primary,
+                            fontWeight: FontWeight.w600,
+                          ),
+                          overflow: TextOverflow.ellipsis,
                         ),
                       ),
-                    Container(
-                      padding:
-                          const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
-                      decoration: BoxDecoration(
-                        borderRadius: BorderRadius.circular(3),
-                        border: Border.all(color: badgeBorder),
+                      const SizedBox(width: 10),
+                      Text(
+                        '$_downloadCurrent / $_downloadTotal',
+                        style: tt.labelSmall?.copyWith(color: cs.onSurfaceVariant),
                       ),
-                      child: Text(
-                        badgeText,
-                        style: TextStyle(color: badgeColor, fontSize: 10),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  LinearProgressIndicator(
+                    value: _downloadTotal > 0 ? _downloadCurrent / _downloadTotal : 0,
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                Row(
+                  children: [
+                    if (!_isDownloading)
+                      IconButton(
+                        tooltip: 'Limpiar selección',
+                        onPressed: _clearSelection,
+                        icon: const Icon(Icons.close_rounded),
                       ),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '${queue.length} seleccionado(s)',
+                            style: tt.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+                          ),
+                          if (selectedBytesStr.isNotEmpty)
+                            Text(
+                              selectedBytesStr,
+                              style: tt.labelSmall?.copyWith(color: cs.onSurfaceVariant),
+                            ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    FilledButton.icon(
+                      onPressed: _isDownloading ? null : _startDownload,
+                      icon: const Icon(Icons.download_rounded),
+                      label: Text(_isDownloading ? 'Descargando' : 'Descargar'),
                     ),
                   ],
                 ),
               ],
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MetricBadge extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color bg;
+  final Color fg;
+
+  const _MetricBadge({
+    required this.icon,
+    required this.label,
+    required this.bg,
+    required this.fg,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 15, color: fg),
           const SizedBox(width: 6),
-          OutlinedButton(
-            onPressed: () => _openItemUrl(item),
-            style: OutlinedButton.styleFrom(
-              side: const BorderSide(color: Color(0xFF2A2A33)),
-              foregroundColor: const Color(0xFFF3F4F6),
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              minimumSize: Size.zero,
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
+          Flexible(
+            child: Text(
+              label,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: fg,
+                    fontWeight: FontWeight.w600,
+                  ),
             ),
-            child: const Text('Abrir', style: TextStyle(fontSize: 11)),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _TopActionButton extends StatelessWidget {
-  final String label;
-  final VoidCallback onTap;
-  final bool isDanger;
-
-  const _TopActionButton({
-    required this.label,
-    required this.onTap,
-    this.isDanger = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return OutlinedButton(
-      onPressed: onTap,
-      style: OutlinedButton.styleFrom(
-        side: BorderSide(
-          color: isDanger ? const Color(0x66EF4444) : const Color(0xFF2A2A33),
-        ),
-        foregroundColor:
-            isDanger ? const Color(0xFFF87171) : const Color(0xFFF3F4F6),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-        minimumSize: Size.zero,
-        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(5)),
-      ),
-      child: Text(label, style: const TextStyle(fontSize: 11.5)),
-    );
-  }
-}
-
-class _FilterTabBtn extends StatelessWidget {
-  final String label;
-  final bool active;
-  final VoidCallback onTap;
-
-  const _FilterTabBtn({
-    required this.label,
-    required this.active,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: GestureDetector(
-        onTap: onTap,
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 5),
-          decoration: BoxDecoration(
-            color: active ? const Color(0xFF17171C) : Colors.transparent,
-            borderRadius: BorderRadius.circular(4),
-          ),
-          alignment: Alignment.center,
-          child: Text(
-            label,
-            style: TextStyle(
-              fontSize: 11.5,
-              fontWeight: FontWeight.w500,
-              color: active ? const Color(0xFFF3F4F6) : const Color(0xFF9CA3AF),
-            ),
-          ),
-        ),
       ),
     );
   }

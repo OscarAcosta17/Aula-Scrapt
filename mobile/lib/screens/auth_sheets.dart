@@ -1,237 +1,193 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import '../services/moodle_service.dart';
 
-/// Muestra el modal para ingresar Token de Acceso (wstoken), equivalente a #token-modal en .exe
+/// Sheet modal Material 3 para ingresar Token de Acceso (wstoken)
 Future<bool> showTokenLoginDialog(
   BuildContext context,
   MoodleService moodleService,
-) async {
-  final controller = TextEditingController();
-  bool isLoading = false;
-  String? errorMsg;
-
-  final result = await showDialog<bool>(
+) {
+  return _showCredentialSheet(
     context: context,
-    builder: (ctx) => StatefulBuilder(
-      builder: (ctx, setDialogState) => AlertDialog(
-        backgroundColor: const Color(0xFF17171C),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(10),
-          side: const BorderSide(color: Color(0xFF2A2A33)),
-        ),
-        title: const Text(
-          'Token de Acceso (wstoken)',
-          style: TextStyle(color: Color(0xFFF3F4F6), fontSize: 16, fontWeight: FontWeight.w600),
-        ),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const Text(
-                'Obtenlo en Aula USM > Perfil > Preferencias > Claves de seguridad:',
-                style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 12, height: 1.4),
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: controller,
-                autofocus: true,
-                style: const TextStyle(
-                  color: Color(0xFFF3F4F6),
-                  fontSize: 13,
-                  fontFamily: 'monospace',
-                ),
-                decoration: InputDecoration(
-                  hintText: 'Pega tu token de Moodle aquí',
-                  hintStyle: const TextStyle(color: Color(0xFF6B7280)),
-                  filled: true,
-                  fillColor: const Color(0xFF0F0F12),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(6),
-                    borderSide: const BorderSide(color: Color(0xFF2A2A33)),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(6),
-                    borderSide: const BorderSide(color: Color(0xFF2A2A33)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(6),
-                    borderSide: const BorderSide(color: Color(0xFF38BDF8)),
-                  ),
-                ),
-              ),
-              if (errorMsg != null) ...[
-                const SizedBox(height: 10),
-                Text(
-                  errorMsg!,
-                  style: const TextStyle(color: Color(0xFFF87171), fontSize: 12),
-                ),
-              ],
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: isLoading ? null : () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancelar', style: TextStyle(color: Color(0xFF9CA3AF))),
-          ),
-          ElevatedButton(
-            onPressed: isLoading
-                ? null
-                : () async {
-                    setDialogState(() {
-                      isLoading = true;
-                      errorMsg = null;
-                    });
-                    final res = await moodleService.loginWithToken(controller.text);
-                    if (!ctx.mounted) return;
-                    if (res['success'] == true) {
-                      Navigator.of(ctx).pop(true);
-                    } else {
-                      setDialogState(() {
-                        isLoading = false;
-                        errorMsg = res['message']?.toString() ?? 'Token inválido';
-                      });
-                    }
-                  },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFF3F4F6),
-              foregroundColor: const Color(0xFF0F0F12),
-            ),
-            child: isLoading
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF0F0F12)),
-                  )
-                : const Text('Conectar con Token', style: TextStyle(fontWeight: FontWeight.w600)),
-          ),
-        ],
-      ),
-    ),
+    title: 'Token de Acceso (wstoken)',
+    subtitle: 'Obtenlo en Aula USM > Perfil > Preferencias > Claves de seguridad.',
+    fieldLabel: 'Token de Moodle',
+    hintText: 'Pega aquí tu wstoken',
+    actionLabel: 'Conectar con Token',
+    icon: Icons.key_rounded,
+    onSubmit: moodleService.loginWithToken,
   );
-  controller.dispose();
-  return result == true;
 }
 
-/// Muestra el modal para ingresar Cookie MoodleSession, equivalente a #cookie-modal en .exe
+/// Sheet modal Material 3 para ingresar Cookie MoodleSession
 Future<bool> showCookieLoginDialog(
   BuildContext context,
   MoodleService moodleService,
-) async {
+) {
+  return _showCredentialSheet(
+    context: context,
+    title: 'Cookie MoodleSession',
+    subtitle: 'Pega el valor de la cookie MoodleSession activa de aula.usm.cl.',
+    fieldLabel: 'MoodleSession',
+    hintText: 'Valor de MoodleSession',
+    actionLabel: 'Verificar y guardar',
+    icon: Icons.cookie_outlined,
+    onSubmit: moodleService.loginWithCookie,
+  );
+}
+
+Future<bool> _showCredentialSheet({
+  required BuildContext context,
+  required String title,
+  required String subtitle,
+  required String fieldLabel,
+  required String hintText,
+  required String actionLabel,
+  required IconData icon,
+  required Future<Map<String, dynamic>> Function(String value) onSubmit,
+}) async {
   final controller = TextEditingController();
   bool isLoading = false;
   String? errorMsg;
 
-  final result = await showDialog<bool>(
+  final result = await showModalBottomSheet<bool>(
     context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
     builder: (ctx) => StatefulBuilder(
-      builder: (ctx, setDialogState) => AlertDialog(
-        backgroundColor: const Color(0xFF17171C),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(10),
-          side: const BorderSide(color: Color(0xFF2A2A33)),
-        ),
-        title: const Text(
-          'Cookie MoodleSession',
-          style: TextStyle(color: Color(0xFFF3F4F6), fontSize: 16, fontWeight: FontWeight.w600),
-        ),
-        content: SingleChildScrollView(
+      builder: (ctx, setSheetState) {
+        final cs = Theme.of(ctx).colorScheme;
+        final tt = Theme.of(ctx).textTheme;
+        final keyboardInset = MediaQuery.of(ctx).viewInsets.bottom;
+
+        return Padding(
+          padding: EdgeInsets.fromLTRB(20, 4, 20, 20 + keyboardInset),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Text(
-                'Pega el valor de la cookie MoodleSession de aula.usm.cl:',
-                style: TextStyle(color: Color(0xFF9CA3AF), fontSize: 12, height: 1.4),
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    decoration: BoxDecoration(
+                      color: cs.primaryContainer,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Icon(icon, color: cs.onPrimaryContainer, size: 22),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      title,
+                      style: tt.titleMedium?.copyWith(fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 10),
+              Text(
+                subtitle,
+                style: tt.bodySmall?.copyWith(
+                  color: cs.onSurfaceVariant,
+                  height: 1.4,
+                ),
+              ),
+              const SizedBox(height: 16),
               TextField(
                 controller: controller,
                 autofocus: true,
-                style: const TextStyle(
-                  color: Color(0xFFF3F4F6),
-                  fontSize: 13,
-                  fontFamily: 'monospace',
-                ),
+                style: const TextStyle(fontSize: 13.5, fontFamily: 'monospace'),
                 decoration: InputDecoration(
-                  hintText: 'Valor de MoodleSession',
-                  hintStyle: const TextStyle(color: Color(0xFF6B7280)),
-                  filled: true,
-                  fillColor: const Color(0xFF0F0F12),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(6),
-                    borderSide: const BorderSide(color: Color(0xFF2A2A33)),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(6),
-                    borderSide: const BorderSide(color: Color(0xFF2A2A33)),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(6),
-                    borderSide: const BorderSide(color: Color(0xFF38BDF8)),
+                  labelText: fieldLabel,
+                  hintText: hintText,
+                  suffixIcon: IconButton(
+                    tooltip: 'Pegar del portapapeles',
+                    onPressed: () async {
+                      final clip = await Clipboard.getData(Clipboard.kTextPlain);
+                      final txt = clip?.text?.trim() ?? '';
+                      if (txt.isNotEmpty) {
+                        controller.text = txt;
+                        setSheetState(() => errorMsg = null);
+                      }
+                    },
+                    icon: const Icon(Icons.content_paste_rounded),
                   ),
                 ),
               ),
               if (errorMsg != null) ...[
-                const SizedBox(height: 10),
-                Text(
-                  errorMsg!,
-                  style: const TextStyle(color: Color(0xFFF87171), fontSize: 12),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: cs.errorContainer,
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Text(
+                    errorMsg!,
+                    style: tt.bodySmall?.copyWith(color: cs.onErrorContainer),
+                  ),
                 ),
               ],
+              const SizedBox(height: 18),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: isLoading ? null : () => Navigator.of(ctx).pop(false),
+                      child: const Text('Cancelar'),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    flex: 2,
+                    child: FilledButton(
+                      onPressed: isLoading
+                          ? null
+                          : () async {
+                              setSheetState(() {
+                                isLoading = true;
+                                errorMsg = null;
+                              });
+                              final res = await onSubmit(controller.text);
+                              if (!ctx.mounted) return;
+                              if (res['success'] == true) {
+                                Navigator.of(ctx).pop(true);
+                              } else {
+                                setSheetState(() {
+                                  isLoading = false;
+                                  errorMsg = res['message']?.toString() ?? 'Credencial inválida';
+                                });
+                              }
+                            },
+                      child: isLoading
+                          ? SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2.2,
+                                color: cs.onPrimary,
+                              ),
+                            )
+                          : Text(actionLabel),
+                    ),
+                  ),
+                ],
+              ),
             ],
           ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: isLoading ? null : () => Navigator.of(ctx).pop(false),
-            child: const Text('Cancelar', style: TextStyle(color: Color(0xFF9CA3AF))),
-          ),
-          ElevatedButton(
-            onPressed: isLoading
-                ? null
-                : () async {
-                    setDialogState(() {
-                      isLoading = true;
-                      errorMsg = null;
-                    });
-                    final res = await moodleService.loginWithCookie(controller.text);
-                    if (!ctx.mounted) return;
-                    if (res['success'] == true) {
-                      Navigator.of(ctx).pop(true);
-                    } else {
-                      setDialogState(() {
-                        isLoading = false;
-                        errorMsg = res['message']?.toString() ?? 'Cookie inválida';
-                      });
-                    }
-                  },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: const Color(0xFFF3F4F6),
-              foregroundColor: const Color(0xFF0F0F12),
-            ),
-            child: isLoading
-                ? const SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF0F0F12)),
-                  )
-                : const Text('Verificar y guardar', style: TextStyle(fontWeight: FontWeight.w600)),
-          ),
-        ],
-      ),
+        );
+      },
     ),
   );
+
   controller.dispose();
   return result == true;
 }
 
-/// Pantalla WebView interactiva para iniciar sesión con Microsoft 365 + 2FA y capturar todas las cookies de aula.usm.cl
+/// Pantalla WebView interactiva para iniciar sesión con Microsoft 365 + 2FA
 class WebViewLoginScreen extends StatefulWidget {
   final MoodleService moodleService;
   final bool clearExistingCookies;
@@ -335,7 +291,6 @@ class _WebViewLoginScreenState extends State<WebViewLoginScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Aún no se detecta sesión activa en Aula USM. Completa el login primero.'),
-            backgroundColor: Color(0xFFB45309),
           ),
         );
       }
@@ -349,49 +304,55 @@ class _WebViewLoginScreenState extends State<WebViewLoginScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+
     return Scaffold(
-      backgroundColor: const Color(0xFF0F0F12),
       appBar: AppBar(
-        backgroundColor: const Color(0xFF17171C),
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Aula USM — Iniciar sesión', style: TextStyle(fontSize: 15)),
+            const Text('Aula USM — Iniciar sesión', style: TextStyle(fontSize: 16)),
             Text(
               _currentUrl,
-              style: const TextStyle(fontSize: 10, color: Color(0xFF9CA3AF)),
+              style: tt.labelSmall?.copyWith(color: cs.onSurfaceVariant),
               overflow: TextOverflow.ellipsis,
             ),
           ],
         ),
         actions: [
-          TextButton(
-            onPressed: _isVerifying ? null : () => _checkAuth(_currentUrl, manualTrigger: true),
-            child: _isVerifying
-                ? const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFF38BDF8)),
-                  )
-                : const Text('Verificar', style: TextStyle(color: Color(0xFF38BDF8), fontSize: 12)),
+          Padding(
+            padding: const EdgeInsets.only(right: 10),
+            child: FilledButton.tonal(
+              onPressed:
+                  _isVerifying ? null : () => _checkAuth(_currentUrl, manualTrigger: true),
+              style: FilledButton.styleFrom(
+                minimumSize: const Size(84, 38),
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+              ),
+              child: _isVerifying
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('Verificar'),
+            ),
           ),
         ],
       ),
-      body: Stack(
-        children: [
-          if (_controller != null)
-            WebViewWidget(controller: _controller!)
-          else
-            const Center(
-              child: CircularProgressIndicator(color: Color(0xFF38BDF8)),
-            ),
-          if (_isLoading)
-            const LinearProgressIndicator(
-              minHeight: 2,
-              backgroundColor: Colors.transparent,
-              color: Color(0xFF38BDF8),
-            ),
-        ],
+      body: SafeArea(
+        top: false,
+        child: Stack(
+          children: [
+            if (_controller != null)
+              WebViewWidget(controller: _controller!)
+            else
+              const Center(child: CircularProgressIndicator()),
+            if (_isLoading)
+              const LinearProgressIndicator(minHeight: 3),
+          ],
+        ),
       ),
     );
   }
@@ -466,13 +427,11 @@ class _AuthenticatedWebViewerScreenState extends State<AuthenticatedWebViewerScr
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF0F0F12),
       appBar: AppBar(
-        backgroundColor: const Color(0xFF17171C),
-        title: Text(widget.title, style: const TextStyle(fontSize: 15)),
+        title: Text(widget.title, maxLines: 1, overflow: TextOverflow.ellipsis),
         actions: [
           IconButton(
-            icon: const Icon(Icons.open_in_new, size: 20),
+            icon: const Icon(Icons.open_in_new_rounded),
             tooltip: 'Abrir en navegador externo',
             onPressed: () async {
               final uri = Uri.tryParse(widget.url);
@@ -483,21 +442,18 @@ class _AuthenticatedWebViewerScreenState extends State<AuthenticatedWebViewerScr
           ),
         ],
       ),
-      body: Stack(
-        children: [
-          if (_controller != null)
-            WebViewWidget(controller: _controller!)
-          else
-            const Center(
-              child: CircularProgressIndicator(color: Color(0xFF38BDF8)),
-            ),
-          if (_isLoading)
-            const LinearProgressIndicator(
-              minHeight: 2,
-              backgroundColor: Colors.transparent,
-              color: Color(0xFF38BDF8),
-            ),
-        ],
+      body: SafeArea(
+        top: false,
+        child: Stack(
+          children: [
+            if (_controller != null)
+              WebViewWidget(controller: _controller!)
+            else
+              const Center(child: CircularProgressIndicator()),
+            if (_isLoading)
+              const LinearProgressIndicator(minHeight: 3),
+          ],
+        ),
       ),
     );
   }
