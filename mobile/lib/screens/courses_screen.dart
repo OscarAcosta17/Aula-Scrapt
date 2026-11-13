@@ -5,20 +5,24 @@ import '../models/course.dart';
 import '../services/downloader_service.dart';
 import '../services/moodle_service.dart';
 import '../services/settings_service.dart';
+import '../services/updater_service.dart';
 import 'auth_sheets.dart';
 import 'folder_picker_dialog.dart';
 import 'login_screen.dart';
+import 'update_sheet.dart';
 
 enum ResourceFilter { files, pending, all }
 
 class CoursesScreen extends StatefulWidget {
   final MoodleService moodleService;
   final SettingsService settingsService;
+  final UpdaterService? updaterService;
 
   const CoursesScreen({
     super.key,
     required this.moodleService,
     required this.settingsService,
+    this.updaterService,
   });
 
   @override
@@ -27,7 +31,10 @@ class CoursesScreen extends StatefulWidget {
 
 class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserver {
   late final DownloaderService _downloaderService;
+  late final UpdaterService _updaterService;
   final _searchCtrl = TextEditingController();
+  AppUpdateCheckResult? _latestUpdateResult;
+  bool _updateAvailable = false;
 
   List<MoodleCourse> _courses = [];
   List<String> _existingSubfolders = [];
@@ -58,6 +65,7 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
       moodleService: widget.moodleService,
       settingsService: widget.settingsService,
     );
+    _updaterService = widget.updaterService ?? UpdaterService();
     _initScreen();
   }
 
@@ -88,6 +96,33 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
       return;
     }
     await _scanAula();
+    if (widget.settingsService.autoCheckUpdates) {
+      unawaited(_checkUpdatesSilently());
+    }
+  }
+
+  Future<void> _checkUpdatesSilently() async {
+    final res = await _updaterService.checkForUpdates();
+    if (!mounted) return;
+    setState(() {
+      _latestUpdateResult = res;
+      _updateAvailable = res.ok && res.updateAvailable;
+    });
+  }
+
+  Future<void> _openUpdateSheet() async {
+    await showAppUpdateSheet(
+      context,
+      updaterService: _updaterService,
+      initialResult: _latestUpdateResult,
+      onCheckCompleted: (res) {
+        if (!mounted) return;
+        setState(() {
+          _latestUpdateResult = res;
+          _updateAvailable = res.ok && res.updateAvailable;
+        });
+      },
+    );
   }
 
   Future<void> _refreshPermissionAndSubfolders() async {
@@ -750,6 +785,75 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
                     value: widget.settingsService.useDynamicColor,
                     onChanged: (v) => widget.settingsService.setUseDynamicColor(v),
                   ),
+                  const SizedBox(height: 18),
+
+                  Text(
+                    'Actualizaciones',
+                    style: tt.labelLarge?.copyWith(color: cs.primary),
+                  ),
+                  const SizedBox(height: 8),
+                  StatefulBuilder(
+                    builder: (sheetCtx, setUpdatesState) => Card(
+                      color: cs.surfaceContainerHigh,
+                      clipBehavior: Clip.antiAlias,
+                      child: Column(
+                        children: [
+                          ListTile(
+                            leading: Badge(
+                              isLabelVisible: _updateAvailable,
+                              smallSize: 8,
+                              child: Icon(
+                                Icons.system_update_rounded,
+                                color: _updateAvailable ? cs.primary : null,
+                              ),
+                            ),
+                            title: Text(
+                              _updateAvailable
+                                  ? 'Nueva versión ${_latestUpdateResult?.tagName ?? ''}'
+                                  : 'Buscar actualizaciones',
+                            ),
+                            subtitle: Text(
+                              _updateAvailable
+                                  ? 'Toca para descargar e instalar el APK'
+                                  : 'Versión v${_latestUpdateResult?.currentVersion ?? '1.2.0'} · GitHub Releases',
+                            ),
+                            trailing: _updateAvailable
+                                ? Chip(
+                                    label: const Text('Nueva'),
+                                    backgroundColor: cs.primaryContainer,
+                                    labelStyle: tt.labelSmall?.copyWith(
+                                      color: cs.onPrimaryContainer,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                    side: BorderSide.none,
+                                  )
+                                : const Icon(Icons.chevron_right_rounded),
+                            onTap: () {
+                              Navigator.of(ctx).pop();
+                              _openUpdateSheet();
+                            },
+                          ),
+                          const Divider(height: 1, indent: 56),
+                          SwitchListTile.adaptive(
+                            contentPadding:
+                                const EdgeInsets.symmetric(horizontal: 16),
+                            secondary:
+                                const Icon(Icons.notifications_active_outlined),
+                            title: const Text('Buscar al abrir la app'),
+                            subtitle: const Text(
+                              'Consulta automáticamente en GitHub Releases',
+                            ),
+                            value: widget.settingsService.autoCheckUpdates,
+                            onChanged: (v) async {
+                              await widget.settingsService
+                                  .setAutoCheckUpdates(v);
+                              setUpdatesState(() {});
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
                   const SizedBox(height: 16),
 
                   FilledButton.tonalIcon(
@@ -809,6 +913,21 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
           ),
         );
       },
+    );
+  }
+
+  Widget _buildSettingsActionButton() {
+    return Padding(
+      padding: const EdgeInsets.only(right: 8),
+      child: IconButton.filledTonal(
+        tooltip: 'Cuenta, apariencia y actualizaciones',
+        onPressed: _openAccountSettingsSheet,
+        icon: Badge(
+          isLabelVisible: _updateAvailable,
+          smallSize: 8,
+          child: const Icon(Icons.tune_rounded),
+        ),
+      ),
     );
   }
 
@@ -879,14 +998,7 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
                 )
               : const Icon(Icons.refresh_rounded),
         ),
-        Padding(
-          padding: const EdgeInsets.only(right: 8),
-          child: IconButton.filledTonal(
-            tooltip: 'Cuenta y apariencia',
-            onPressed: _openAccountSettingsSheet,
-            icon: const Icon(Icons.tune_rounded),
-          ),
-        ),
+        _buildSettingsActionButton(),
       ],
     );
   }
@@ -980,14 +1092,7 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
                       )
                     : const Icon(Icons.refresh_rounded),
               ),
-              Padding(
-                padding: const EdgeInsets.only(right: 8),
-                child: IconButton.filledTonal(
-                  tooltip: 'Cuenta y apariencia',
-                  onPressed: _openAccountSettingsSheet,
-                  icon: const Icon(Icons.tune_rounded),
-                ),
-              ),
+              _buildSettingsActionButton(),
             ],
           ),
 

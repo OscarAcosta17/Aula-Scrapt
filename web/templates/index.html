@@ -36,6 +36,10 @@
                 <button class="btn btn-outline btn-sm" onclick="toggleModal('qr-modal')">
                     Movil (QR)
                 </button>
+                <button id="btn-settings" class="btn btn-outline btn-sm btn-with-dot" onclick="openSettingsModal()" title="Configuracion y actualizaciones">
+                    Configuracion
+                    <span id="update-badge-dot" class="update-dot hidden" title="Actualizacion disponible"></span>
+                </button>
                 <button class="btn btn-outline btn-sm" onclick="shutdownApp()" title="Cerrar la aplicacion">
                     Cerrar app
                 </button>
@@ -176,6 +180,86 @@
                 <div class="modal-footer">
                     <button class="btn btn-outline" onclick="toggleModal('cookie-modal')">Cancelar</button>
                     <button class="btn btn-primary" onclick="saveManualCookie()">Verificar y guardar</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Configuracion y Actualizaciones -->
+    <div id="settings-modal" class="modal-backdrop hidden" onclick="closeModalOnBackdrop(event, 'settings-modal')">
+        <div class="modal-card modal-card-wide">
+            <div class="modal-header">
+                <div class="settings-title-group">
+                    <h3>Configuracion y actualizaciones</h3>
+                    <span id="settings-version-pill" class="version-pill">v1.2.0</span>
+                </div>
+                <button class="close-btn" onclick="toggleModal('settings-modal')">&times;</button>
+            </div>
+            <div class="modal-body settings-body">
+                <div class="settings-section">
+                    <div class="settings-section-title">Carpeta base de descargas</div>
+                    <div class="settings-path-row">
+                        <input type="text" id="settings-download-root" class="text-input" readonly placeholder="Sin carpeta configurada" />
+                        <button class="btn btn-outline btn-sm" onclick="chooseFolderFromSettings()">Elegir...</button>
+                    </div>
+                </div>
+
+                <div class="settings-section">
+                    <div class="settings-row-between">
+                        <div>
+                            <div class="settings-section-title">Buscar actualizaciones al iniciar</div>
+                            <p class="muted">Consulta GitHub Releases (<span id="settings-repo-name">OscarAcosta17/Aula-Scrapt</span>) automaticamente.</p>
+                        </div>
+                        <label class="switch">
+                            <input type="checkbox" id="toggle-auto-updates" checked onchange="toggleAutoCheckUpdates(this.checked)" />
+                            <span class="slider"></span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="settings-section">
+                    <div class="settings-row-between">
+                        <div>
+                            <div class="settings-section-title">Actualizaciones de la aplicacion</div>
+                            <p id="settings-env-desc" class="muted">Verificando entorno de instalacion...</p>
+                        </div>
+                        <button id="btn-check-updates" class="btn btn-outline btn-sm" onclick="checkForAppUpdates(false)">
+                            Buscar actualizaciones
+                        </button>
+                    </div>
+
+                    <div id="update-status-msg" class="update-status hidden"></div>
+
+                    <div id="update-available-box" class="update-card hidden">
+                        <div class="update-card-head">
+                            <div>
+                                <span id="update-new-version" class="update-tag">v0.0.0</span>
+                                <strong id="update-release-title">Nueva version disponible</strong>
+                            </div>
+                            <span id="update-asset-size" class="muted"></span>
+                        </div>
+                        <pre id="update-changelog" class="update-changelog"></pre>
+                        <p id="update-permission-note" class="update-perm-note hidden"></p>
+
+                        <div id="update-progress-box" class="update-progress-box hidden">
+                            <div class="progress-bar-track">
+                                <div id="update-progress-bar" class="progress-bar-fill" style="width: 0%"></div>
+                            </div>
+                            <div class="progress-meta">
+                                <span id="update-progress-msg">Preparando descarga...</span>
+                                <span id="update-progress-pct">0%</span>
+                            </div>
+                        </div>
+
+                        <div class="modal-footer">
+                            <a id="link-release-github" class="btn btn-outline btn-sm" href="https://github.com/OscarAcosta17/Aula-Scrapt/releases" target="_blank" rel="noopener">
+                                Ver en GitHub
+                            </a>
+                            <button id="btn-apply-update" class="btn btn-primary btn-sm" onclick="applyAppUpdate()">
+                                Descargar y actualizar
+                            </button>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>

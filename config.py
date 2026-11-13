@@ -21,6 +21,12 @@ SESSION_FILE = DATA_DIR / "session.json"
 HISTORY_FILE = DATA_DIR / "download_history.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 
+# Versión y repositorio oficial para verificación y actualización automática
+APP_VERSION = "1.2.0"
+GITHUB_REPO = "OscarAcosta17/Aula-Scrapt"
+GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases"
+GITHUB_LATEST_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
 # URLs de Aula USM
 AULA_BASE_URL = "https://aula.usm.cl"
 AULA_LOGIN_URL = f"{AULA_BASE_URL}/login/index.php"
@@ -99,13 +105,14 @@ def sanitize_folder_name(name: str) -> str:
 
 
 def load_settings() -> Dict:
-    """Carga la configuración local del usuario (ruta de guardado y mapeo de carpetas)."""
+    """Carga la configuración local del usuario (ruta de guardado, mapeo de carpetas y actualizaciones)."""
     if SETTINGS_FILE.exists():
         try:
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if "download_root" in data and data["download_root"]:
                     data.setdefault("course_folders", {})
+                    data.setdefault("auto_check_updates", True)
                     return data
         except Exception:
             pass
@@ -113,6 +120,7 @@ def load_settings() -> Dict:
     default_data = {
         "download_root": str(DEFAULT_DOWNLOAD_DIR),
         "course_folders": {},
+        "auto_check_updates": True,
     }
     save_settings(default_data)
     return default_data

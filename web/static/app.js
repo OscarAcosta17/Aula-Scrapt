@@ -3,6 +3,10 @@ let currentFilter = 'files'; // 'files' | 'new' | 'all'
 let selectedItemsMap = new Map();
 let expandedCourses = new Set();  // Por defecto vacío: ningún ramo viene desplegado
 let expandedSections = new Set(); // Secciones desplegadas dentro de un ramo
+let cachedAppInfo = null;
+let latestUpdateInfo = null;
+let autoCheckUpdatesEnabled = true;
+let startupUpdateChecked = false;
 
 document.addEventListener('DOMContentLoaded', () => {
     loadSettings();
@@ -38,10 +42,296 @@ async function loadSettings() {
         const data = await res.json();
         if (data.download_root) {
             document.getElementById('input-download-root').value = data.download_root;
+            const settingsRootEl = document.getElementById('settings-download-root');
+            if (settingsRootEl) settingsRootEl.value = data.download_root;
         }
         updateExistingFoldersDatalist(data.existing_subfolders || []);
+
+        autoCheckUpdatesEnabled = data.auto_check_updates !== false;
+        const toggleEl = document.getElementById('toggle-auto-updates');
+        if (toggleEl) toggleEl.checked = autoCheckUpdatesEnabled;
+
+        if (data.app_info) {
+            cachedAppInfo = data.app_info;
+            renderAppEnvironmentInfo(data.app_info);
+        }
+
+        if (autoCheckUpdatesEnabled && !startupUpdateChecked) {
+            startupUpdateChecked = true;
+            setTimeout(() => checkForAppUpdates(true), 600);
+        }
     } catch (e) {
         // Silencioso al iniciar
+    }
+}
+
+function renderAppEnvironmentInfo(appInfo) {
+    if (!appInfo) return;
+    const pill = document.getElementById('settings-version-pill');
+    const repoEl = document.getElementById('settings-repo-name');
+    const envEl = document.getElementById('settings-env-desc');
+
+    if (pill && appInfo.current_version) {
+        pill.textContent = `v${appInfo.current_version}`;
+    }
+    if (repoEl && appInfo.repo) {
+        repoEl.textContent = appInfo.repo;
+    }
+    if (envEl) {
+        const modeLabels = {
+            onefile: 'Ejecutable standalone (.exe)',
+            onedir: 'Aplicacion portable (.zip)',
+            source: 'Modo codigo fuente (Python)'
+        };
+        const modeLabel = modeLabels[appInfo.package_mode] || appInfo.package_mode || 'Desconocido';
+        if (!appInfo.can_self_update) {
+            envEl.textContent = `${modeLabel} — La actualizacion automatica aplica en la version compilada (.exe).`;
+        } else if (appInfo.requires_elevation) {
+            envEl.textContent = `${modeLabel} — Carpeta protegida (se solicitara permiso UAC al actualizar).`;
+        } else {
+            envEl.textContent = `${modeLabel} — Permiso de escritura listo para actualizar.`;
+        }
+    }
+}
+
+async function openSettingsModal() {
+    toggleModal('settings-modal');
+    await loadSettings();
+    const rootInput = document.getElementById('input-download-root');
+    const settingsRootEl = document.getElementById('settings-download-root');
+    if (rootInput && settingsRootEl) {
+        settingsRootEl.value = rootInput.value;
+    }
+    if (latestUpdateInfo) {
+        renderUpdateCheckResult(latestUpdateInfo, false);
+    }
+}
+
+async function chooseFolderFromSettings() {
+    if (typeof chooseDownloadFolder === 'function') {
+        await chooseDownloadFolder();
+        const rootInput = document.getElementById('input-download-root');
+        const settingsRootEl = document.getElementById('settings-download-root');
+        if (rootInput && settingsRootEl) {
+            settingsRootEl.value = rootInput.value;
+        }
+    }
+}
+
+async function toggleAutoCheckUpdates(enabled) {
+    autoCheckUpdatesEnabled = !!enabled;
+    try {
+        await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ auto_check_updates: autoCheckUpdatesEnabled })
+        });
+    } catch (e) {
+        // Silencioso
+    }
+}
+
+function setUpdateStatusMessage(text, kind = '') {
+    const statusEl = document.getElementById('update-status-msg');
+    if (!statusEl) return;
+    if (!text) {
+        statusEl.className = 'update-status hidden';
+        statusEl.textContent = '';
+        return;
+    }
+    statusEl.className = `update-status ${kind}`.trim();
+    statusEl.textContent = text;
+}
+
+function renderUpdateCheckResult(data, silent = false) {
+    const dot = document.getElementById('update-badge-dot');
+    const box = document.getElementById('update-available-box');
+    const versionEl = document.getElementById('update-new-version');
+    const titleEl = document.getElementById('update-release-title');
+    const sizeEl = document.getElementById('update-asset-size');
+    const logEl = document.getElementById('update-changelog');
+    const permEl = document.getElementById('update-permission-note');
+    const linkEl = document.getElementById('link-release-github');
+    const applyBtn = document.getElementById('btn-apply-update');
+
+    if (dot) {
+        dot.classList.toggle('hidden', !data.update_available);
+    }
+
+    if (!data.ok) {
+        if (box) box.classList.add('hidden');
+        if (!silent) {
+            setUpdateStatusMessage(data.error || 'No se pudo consultar GitHub Releases.', 'err');
+        }
+        return;
+    }
+
+    if (data.no_releases) {
+        if (box) box.classList.add('hidden');
+        if (!silent) {
+            setUpdateStatusMessage('Aun no hay versiones publicadas en GitHub.', 'warn');
+        }
+        return;
+    }
+
+    if (!data.update_available) {
+        if (box) box.classList.add('hidden');
+        if (!silent) {
+            setUpdateStatusMessage(`Tienes la ultima version instalada (v${data.current_version}).`, 'ok');
+        }
+        return;
+    }
+
+    if (!silent) {
+        setUpdateStatusMessage(`Nueva version disponible: v${data.latest_version}.`, 'ok');
+    }
+
+    if (versionEl) versionEl.textContent = data.tag_name || `v${data.latest_version}`;
+    if (titleEl) titleEl.textContent = data.release_name || 'Actualizacion disponible';
+    if (sizeEl) {
+        sizeEl.textContent = data.asset ? `${data.asset.name} (${data.asset.size_label})` : '';
+    }
+    if (logEl) {
+        logEl.textContent = (data.changelog || 'Sin notas de version.').trim();
+    }
+    if (linkEl && data.html_url) {
+        linkEl.href = data.html_url;
+    }
+
+    if (permEl) {
+        if (!data.can_self_update) {
+            permEl.textContent = 'Estas ejecutando desde codigo fuente: descarga el .exe desde GitHub o haz git pull.';
+            permEl.classList.remove('hidden');
+        } else if (!data.asset || !data.asset.download_url) {
+            permEl.textContent = 'Esta release no incluye un paquete de Windows compatible para descarga directa.';
+            permEl.classList.remove('hidden');
+        } else if (data.requires_elevation) {
+            permEl.textContent = 'La carpeta de instalacion requiere permisos de administrador: Windows pedira confirmacion UAC al aplicar.';
+            permEl.classList.remove('hidden');
+        } else {
+            permEl.classList.add('hidden');
+            permEl.textContent = '';
+        }
+    }
+
+    if (applyBtn) {
+        const canDownloadNow = Boolean(data.can_self_update && data.asset && data.asset.download_url);
+        applyBtn.classList.toggle('hidden', !canDownloadNow);
+        applyBtn.disabled = !canDownloadNow;
+        applyBtn.textContent = 'Descargar y actualizar';
+    }
+
+    if (box) box.classList.remove('hidden');
+}
+
+async function checkForAppUpdates(silent = false) {
+    const checkBtn = document.getElementById('btn-check-updates');
+    if (!silent && checkBtn) {
+        checkBtn.disabled = true;
+        checkBtn.textContent = 'Buscando...';
+        setUpdateStatusMessage('Consultando GitHub Releases...', '');
+    }
+
+    try {
+        const res = await fetch('/api/updates/check');
+        const data = await res.json();
+        latestUpdateInfo = data;
+        renderUpdateCheckResult(data, silent);
+    } catch (e) {
+        if (!silent) {
+            setUpdateStatusMessage(`Error al buscar actualizaciones: ${e.message}`, 'err');
+        }
+    } finally {
+        if (checkBtn) {
+            checkBtn.disabled = false;
+            checkBtn.textContent = 'Buscar actualizaciones';
+        }
+    }
+}
+
+async function applyAppUpdate() {
+    if (!latestUpdateInfo || !latestUpdateInfo.asset || !latestUpdateInfo.asset.download_url) {
+        return;
+    }
+
+    const applyBtn = document.getElementById('btn-apply-update');
+    const checkBtn = document.getElementById('btn-check-updates');
+    const progressBox = document.getElementById('update-progress-box');
+    const progressBar = document.getElementById('update-progress-bar');
+    const progressMsg = document.getElementById('update-progress-msg');
+    const progressPct = document.getElementById('update-progress-pct');
+
+    if (applyBtn) {
+        applyBtn.disabled = true;
+        applyBtn.textContent = 'Actualizando...';
+    }
+    if (checkBtn) checkBtn.disabled = true;
+    if (progressBox) progressBox.classList.remove('hidden');
+    if (progressBar) progressBar.style.width = '0%';
+    if (progressPct) progressPct.textContent = '0%';
+    if (progressMsg) progressMsg.textContent = 'Iniciando descarga...';
+
+    try {
+        const res = await fetch('/api/updates/apply', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                download_url: latestUpdateInfo.asset.download_url,
+                asset_name: latestUpdateInfo.asset.name,
+                size: latestUpdateInfo.asset.size || 0
+            })
+        });
+
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.detail || `Error HTTP ${res.status}`);
+        }
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let finishedRestart = false;
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            const chunks = buffer.split('\n\n');
+            buffer = chunks.pop();
+
+            for (const chunk of chunks) {
+                const line = chunk.split('\n').find(l => l.startsWith('data: '));
+                if (!line) continue;
+                const payload = JSON.parse(line.slice(6));
+                const pct = Math.max(0, Math.min(100, payload.percent || 0));
+
+                if (progressBar) progressBar.style.width = `${pct}%`;
+                if (progressPct) progressPct.textContent = `${pct}%`;
+                if (progressMsg && payload.message) progressMsg.textContent = payload.message;
+
+                if (payload.event === 'error') {
+                    throw new Error(payload.message || 'Error durante la actualizacion');
+                }
+                if (payload.event === 'ready_restart') {
+                    finishedRestart = true;
+                    setUpdateStatusMessage(payload.message || 'Aplicando actualizacion y reiniciando...', 'ok');
+                    showBanner('Actualizacion descargada. Reiniciando Aula-Scrapt...', 'success');
+                }
+            }
+        }
+
+        if (!finishedRestart && applyBtn) {
+            applyBtn.disabled = false;
+            applyBtn.textContent = 'Descargar y actualizar';
+            if (checkBtn) checkBtn.disabled = false;
+        }
+    } catch (e) {
+        setUpdateStatusMessage(`No se pudo completar la actualizacion: ${e.message}`, 'err');
+        if (applyBtn) {
+            applyBtn.disabled = false;
+            applyBtn.textContent = 'Descargar y actualizar';
+        }
+        if (checkBtn) checkBtn.disabled = false;
     }
 }
 

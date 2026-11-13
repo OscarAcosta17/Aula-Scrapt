@@ -727,6 +727,212 @@ html, body {
     margin-top: 8px;
 }
 
+/* Configuracion y auto-actualizaciones */
+.btn-with-dot {
+    position: relative;
+}
+
+.update-dot {
+    position: absolute;
+    top: -3px;
+    right: -3px;
+    width: 8px;
+    height: 8px;
+    border-radius: 99px;
+    background: var(--success);
+    border: 1.5px solid var(--bg-card);
+    box-shadow: 0 0 6px rgba(34, 197, 94, 0.7);
+}
+
+.modal-card-wide {
+    max-width: 500px;
+}
+
+.settings-title-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.version-pill {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 99px;
+    background: var(--bg-sub);
+    border: 1px solid var(--border);
+    color: var(--muted);
+}
+
+.settings-body {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.settings-section {
+    background: var(--bg-sub);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 12px;
+}
+
+.settings-section-title {
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 3px;
+}
+
+.settings-path-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.settings-path-row .text-input {
+    margin: 4px 0 0 0;
+}
+
+.settings-row-between {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+}
+
+.switch {
+    position: relative;
+    display: inline-block;
+    width: 38px;
+    height: 21px;
+    flex-shrink: 0;
+}
+
+.switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.slider {
+    position: absolute;
+    cursor: pointer;
+    inset: 0;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 99px;
+    transition: 0.2s;
+}
+
+.slider::before {
+    content: "";
+    position: absolute;
+    height: 15px;
+    width: 15px;
+    left: 2px;
+    top: 2px;
+    background: var(--muted);
+    border-radius: 50%;
+    transition: 0.2s;
+}
+
+.switch input:checked + .slider {
+    background: rgba(59, 130, 246, 0.25);
+    border-color: #3b82f6;
+}
+
+.switch input:checked + .slider::before {
+    transform: translateX(17px);
+    background: #3b82f6;
+}
+
+.update-status {
+    margin-top: 10px;
+    padding: 8px 10px;
+    border-radius: 5px;
+    font-size: 12px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--muted);
+}
+
+.update-status.ok {
+    border-color: rgba(34, 197, 94, 0.45);
+    color: #86efac;
+    background: rgba(34, 197, 94, 0.08);
+}
+
+.update-status.warn {
+    border-color: rgba(245, 158, 11, 0.45);
+    color: #fcd34d;
+    background: rgba(245, 158, 11, 0.08);
+}
+
+.update-status.err {
+    border-color: rgba(239, 68, 68, 0.45);
+    color: #fca5a5;
+    background: rgba(239, 68, 68, 0.08);
+}
+
+.update-card {
+    margin-top: 10px;
+    padding: 10px;
+    border-radius: 5px;
+    border: 1px solid rgba(34, 197, 94, 0.35);
+    background: var(--bg);
+}
+
+.update-card-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: 12.5px;
+}
+
+.update-tag {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: rgba(34, 197, 94, 0.16);
+    color: #4ade80;
+    margin-right: 6px;
+}
+
+.update-changelog {
+    font-family: inherit;
+    font-size: 11.5px;
+    line-height: 1.45;
+    color: var(--muted);
+    background: var(--bg-sub);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 8px;
+    max-height: 130px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    margin: 0 0 8px 0;
+}
+
+.update-perm-note {
+    font-size: 11.5px;
+    color: #fbbf24;
+    margin: 0 0 8px 0;
+}
+
+.update-progress-box {
+    margin: 8px 0;
+}
+
+.update-progress-box .progress-meta {
+    margin-top: 4px;
+}
+
 /* Responsividad Movil y Pantallas Pequenas */
 @media (max-width: 768px) {
     .topbar, .control-bar, .workspace, .download-bar {

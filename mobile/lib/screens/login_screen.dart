@@ -2,8 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../services/moodle_service.dart';
 import '../services/settings_service.dart';
+import '../services/updater_service.dart';
 import 'auth_sheets.dart';
 import 'courses_screen.dart';
+import 'update_sheet.dart';
 
 class LoginScreen extends StatefulWidget {
   final MoodleService moodleService;
@@ -375,45 +377,61 @@ class _LoginScreenState extends State<LoginScreen> {
           ),
         ),
         child: SafeArea(
-          child: LayoutBuilder(
-            builder: (context, constraints) {
-              final isWide = constraints.maxWidth >= 680;
-              return Center(
-                child: SingleChildScrollView(
-                  padding: EdgeInsets.symmetric(
-                    horizontal: isWide ? 36 : 20,
-                    vertical: 24,
-                  ),
-                  child: ConstrainedBox(
-                    constraints: BoxConstraints(maxWidth: isWide ? 920 : 440),
-                    child: isWide
-                        ? Row(
-                            crossAxisAlignment: CrossAxisAlignment.center,
-                            children: [
-                              Expanded(
-                                flex: 5,
-                                child: _buildHeroSection(context, alignedLeft: true),
+          child: Stack(
+            children: [
+              LayoutBuilder(
+                builder: (context, constraints) {
+                  final isWide = constraints.maxWidth >= 680;
+                  return Center(
+                    child: SingleChildScrollView(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: isWide ? 36 : 20,
+                        vertical: 24,
+                      ),
+                      child: ConstrainedBox(
+                        constraints: BoxConstraints(maxWidth: isWide ? 920 : 440),
+                        child: isWide
+                            ? Row(
+                                crossAxisAlignment: CrossAxisAlignment.center,
+                                children: [
+                                  Expanded(
+                                    flex: 5,
+                                    child: _buildHeroSection(context, alignedLeft: true),
+                                  ),
+                                  const SizedBox(width: 40),
+                                  Expanded(
+                                    flex: 6,
+                                    child: _buildAuthPanel(context),
+                                  ),
+                                ],
+                              )
+                            : Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.stretch,
+                                children: [
+                                  _buildHeroSection(context),
+                                  const SizedBox(height: 28),
+                                  _buildAuthPanel(context),
+                                ],
                               ),
-                              const SizedBox(width: 40),
-                              Expanded(
-                                flex: 6,
-                                child: _buildAuthPanel(context),
-                              ),
-                            ],
-                          )
-                        : Column(
-                            mainAxisSize: MainAxisSize.min,
-                            crossAxisAlignment: CrossAxisAlignment.stretch,
-                            children: [
-                              _buildHeroSection(context),
-                              const SizedBox(height: 28),
-                              _buildAuthPanel(context),
-                            ],
-                          ),
+                      ),
+                    ),
+                  );
+                },
+              ),
+              Positioned(
+                top: 8,
+                right: 12,
+                child: IconButton.filledTonal(
+                  tooltip: 'Buscar actualizaciones',
+                  onPressed: () => showAppUpdateSheet(
+                    context,
+                    updaterService: UpdaterService(),
                   ),
+                  icon: const Icon(Icons.system_update_rounded),
                 ),
-              );
-            },
+              ),
+            ],
           ),
         ),
       ),

@@ -26,6 +26,7 @@ elif hasattr(sys.stderr, "reconfigure"):
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
 from config import (
+    APP_VERSION,
     BASE_DIR,
     get_download_root,
     list_existing_subfolders,
@@ -45,8 +46,15 @@ from scraper.obsidian_sync import (
     enrich_items_with_status,
     mark_items_as_seen,
 )
+from scraper.updater import (
+    check_for_updates,
+    download_update_asset,
+    get_update_environment_info,
+    launch_windows_updater,
+)
 
-app = FastAPI(title="Aula-Scrapt USM", version="1.1.0")
+app = FastAPI(title="Aula-Scrapt USM", version=APP_VERSION)
+_active_webview_window = None
 
 STATIC_DIR = BASE_DIR / "web" / "static"
 TEMPLATES_DIR = BASE_DIR / "web" / "templates"
@@ -112,6 +120,13 @@ class SettingsUpdateRequest(BaseModel):
     download_root: Optional[str] = None
     course_id: Optional[int] = None
     course_folder: Optional[str] = None
+    auto_check_updates: Optional[bool] = None
+
+
+class ApplyUpdateRequest(BaseModel):
+    download_url: str
+    asset_name: str
+    size: int = 0
 
 
 class DownloadItemRequest(BaseModel):
@@ -155,6 +170,8 @@ async def api_get_settings():
         "download_root": settings.get("download_root", ""),
         "course_folders": settings.get("course_folders", {}),
         "existing_subfolders": list_existing_subfolders(),
+        "auto_check_updates": bool(settings.get("auto_check_updates", True)),
+        "app_info": get_update_environment_info(),
     }
 
 
@@ -172,12 +189,102 @@ async def api_update_settings(payload: SettingsUpdateRequest):
             payload.course_folder.strip()
         )
 
+    if payload.auto_check_updates is not None:
+        settings["auto_check_updates"] = bool(payload.auto_check_updates)
+
     save_settings(settings)
     return {
         "download_root": settings["download_root"],
         "course_folders": settings.get("course_folders", {}),
         "existing_subfolders": list_existing_subfolders(),
+        "auto_check_updates": bool(settings.get("auto_check_updates", True)),
     }
+
+
+@app.get("/api/updates/check")
+async def api_check_updates():
+    return await asyncio.to_thread(check_for_updates)
+
+
+@app.post("/api/updates/apply")
+async def api_apply_update(payload: ApplyUpdateRequest):
+    """Descarga con progreso SSE, lanza el script de actualización (con UAC si hace falta) y cierra para reiniciar."""
+    import queue as queue_mod
+    import threading
+
+    progress_queue: queue_mod.Queue = queue_mod.Queue()
+
+    def worker():
+        try:
+            progress_queue.put(
+                {"event": "status", "percent": 0, "message": f"Conectando para descargar {payload.asset_name}..."}
+            )
+
+            def on_progress(downloaded: int, total: int, pct: int):
+                mb_done = downloaded / (1024 * 1024)
+                mb_tot = total / (1024 * 1024) if total > 0 else 0
+                txt = (
+                    f"Descargando: {mb_done:.1f} MB / {mb_tot:.1f} MB"
+                    if total > 0
+                    else f"Descargando: {mb_done:.1f} MB"
+                )
+                progress_queue.put({"event": "progress", "percent": pct, "message": txt})
+
+            staged = download_update_asset(
+                payload.download_url,
+                payload.asset_name,
+                expected_size=payload.size,
+                on_progress=on_progress,
+            )
+            progress_queue.put(
+                {
+                    "event": "progress",
+                    "percent": 100,
+                    "message": "Aplicando actualización y solicitando permisos si corresponde...",
+                }
+            )
+            launch_info = launch_windows_updater(staged)
+            progress_queue.put(
+                {
+                    "event": "ready_restart",
+                    "percent": 100,
+                    "message": "Actualización lista. Reiniciando Aula-Scrapt...",
+                    **launch_info,
+                }
+            )
+        except Exception as exc:
+            progress_queue.put({"event": "error", "message": str(exc)})
+        finally:
+            progress_queue.put(None)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+    async def event_stream():
+        should_restart = False
+        while True:
+            item = await asyncio.to_thread(progress_queue.get)
+            if item is None:
+                break
+            if item.get("event") == "ready_restart":
+                should_restart = True
+            yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+
+        if should_restart:
+            def stop_for_update():
+                import os
+                import time
+
+                time.sleep(0.7)
+                try:
+                    if _active_webview_window is not None:
+                        _active_webview_window.destroy()
+                except Exception:
+                    pass
+                os._exit(0)
+
+            threading.Thread(target=stop_for_update, daemon=True).start()
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.post("/api/settings/pick-folder")
@@ -461,8 +568,8 @@ if __name__ == "__main__":
 
         # Crear y abrir ventana nativa de escritorio
         icon_path = str(BASE_DIR / "icon.ico") if (BASE_DIR / "icon.ico").exists() else None
-        webview.create_window(
-            title="Aula-Scrapt USM",
+        _active_webview_window = webview.create_window(
+            title=f"Aula-Scrapt USM v{APP_VERSION}",
             url=f"http://127.0.0.1:{port}",
             width=1280,
             height=820,

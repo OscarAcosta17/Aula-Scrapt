@@ -25,6 +25,7 @@ class SettingsService {
   static const String _keyHistory = 'download_history_json';
   static const String _keyThemeMode = 'settings_theme_mode';
   static const String _keyUseDynamicColor = 'settings_use_dynamic_color';
+  static const String _keyAutoCheckUpdates = 'settings_auto_check_updates';
 
   final ValueNotifier<int> themeNotifier = ValueNotifier<int>(0);
 
@@ -81,6 +82,7 @@ class SettingsService {
       _ => ThemeMode.system,
     };
     _useDynamicColor = prefs.getBool(_keyUseDynamicColor) ?? true;
+    _autoCheckUpdates = prefs.getBool(_keyAutoCheckUpdates) ?? true;
     await refreshSystemSeedColor();
 
     _courseFolders = _decodeStringMap(prefs.getString(_keyCourseFolders));
@@ -128,6 +130,15 @@ class SettingsService {
     themeNotifier.value++;
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_keyUseDynamicColor, value);
+  }
+
+  bool _autoCheckUpdates = true;
+  bool get autoCheckUpdates => _autoCheckUpdates;
+
+  Future<void> setAutoCheckUpdates(bool value) async {
+    _autoCheckUpdates = value;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_keyAutoCheckUpdates, value);
   }
 
   Map<String, String> _decodeStringMap(String? raw) {
