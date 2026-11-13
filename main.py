@@ -1243,7 +1243,6 @@ if __name__ == "__main__":
 
         # Crear y abrir ventana nativa de escritorio
         icon_path = str(BASE_DIR / "icon.ico") if (BASE_DIR / "icon.ico").exists() else None
-        _start_windows_tray_icon(icon_path)
         _active_webview_window = webview.create_window(
             title=f"Aula-Scrapt USM v{APP_VERSION}",
             url=f"http://127.0.0.1:{port}",
@@ -1253,7 +1252,8 @@ if __name__ == "__main__":
             background_color="#0d1117",
         )
         _active_webview_window.events.closing += _on_window_closing
-        webview.start(icon=icon_path)
+        # Iniciar tray icon recién cuando pywebview haya cargado pythonnet/clr en el hilo principal
+        webview.start(func=lambda: _start_windows_tray_icon(icon_path), icon=icon_path)
         _dispose_tray_icon()
         sys.exit(0)
     else:
