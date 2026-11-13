@@ -3,15 +3,18 @@ class MoodleItem {
   final int courseId;
   final String title;
   final String section;
-  final String type; // 'file', 'assignment', 'forum', 'link', 'page'
+  final String type; // 'file', 'assignment', 'quiz', 'forum', 'link', 'page'
   final String url;
   final String fileName;
+  final String fileExt;
   final bool downloadable;
   int sizeBytes;
   bool isDownloaded;
   bool isNew;
   String? localPath;
   bool isSelected;
+  int? dueTimestamp;
+  String dueText;
 
   MoodleItem({
     required this.id,
@@ -21,13 +24,42 @@ class MoodleItem {
     required this.type,
     required this.url,
     required this.fileName,
+    this.fileExt = '',
     required this.downloadable,
     this.sizeBytes = 0,
     this.isDownloaded = false,
     this.isNew = true,
     this.localPath,
     this.isSelected = false,
+    this.dueTimestamp,
+    this.dueText = '',
   });
+
+  String get effectiveExt {
+    if (fileExt.isNotEmpty) return fileExt.toLowerCase();
+    final candidate = fileName.contains('.') ? fileName : title;
+    final dot = candidate.lastIndexOf('.');
+    if (dot != -1 && dot < candidate.length - 1) {
+      final ext = candidate.substring(dot + 1).toLowerCase().trim();
+      if (ext.length <= 6 && !ext.contains(' ')) return ext;
+    }
+    return '';
+  }
+
+  bool get hasDeadline => (dueTimestamp ?? 0) > 0 || dueText.isNotEmpty;
+
+  bool get isUrgentDeadline {
+    if ((dueTimestamp ?? 0) <= 0) return false;
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final diff = dueTimestamp! - nowSec;
+    return diff > 0 && diff <= 48 * 3600;
+  }
+
+  bool get isPastDeadline {
+    if ((dueTimestamp ?? 0) <= 0) return false;
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    return dueTimestamp! < nowSec;
+  }
 
   String get formattedSize => formatFileSize(sizeBytes);
 
@@ -37,6 +69,8 @@ class MoodleItem {
         return 'Archivo';
       case 'assignment':
         return 'Tarea';
+      case 'quiz':
+        return 'Cuestionario';
       case 'forum':
         return 'Foro';
       case 'link':
@@ -47,6 +81,42 @@ class MoodleItem {
         return 'Recurso';
     }
   }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'course_id': courseId,
+        'title': title,
+        'section': section,
+        'type': type,
+        'url': url,
+        'file_name': fileName,
+        'file_ext': effectiveExt,
+        'downloadable': downloadable,
+        'size_bytes': sizeBytes,
+        'is_downloaded': isDownloaded,
+        'is_new': isNew,
+        'local_path': localPath,
+        'due_timestamp': dueTimestamp,
+        'due_text': dueText,
+      };
+
+  factory MoodleItem.fromJson(Map<String, dynamic> json) => MoodleItem(
+        id: json['id']?.toString() ?? '',
+        courseId: (json['course_id'] as num?)?.toInt() ?? 0,
+        title: json['title']?.toString() ?? '',
+        section: json['section']?.toString() ?? 'General',
+        type: json['type']?.toString() ?? 'file',
+        url: json['url']?.toString() ?? '',
+        fileName: json['file_name']?.toString() ?? '',
+        fileExt: json['file_ext']?.toString() ?? '',
+        downloadable: json['downloadable'] == true,
+        sizeBytes: (json['size_bytes'] as num?)?.toInt() ?? 0,
+        isDownloaded: json['is_downloaded'] == true,
+        isNew: json['is_new'] != false,
+        localPath: json['local_path']?.toString(),
+        dueTimestamp: (json['due_timestamp'] as num?)?.toInt(),
+        dueText: json['due_text']?.toString() ?? '',
+      );
 
   static String formatFileSize(int bytes) {
     if (bytes <= 0) return '';
@@ -71,6 +141,7 @@ class MoodleCourse {
   List<MoodleItem> items;
   bool isLoadingContents;
   String? scanError;
+  bool isHidden;
 
   MoodleCourse({
     required this.id,
@@ -84,7 +155,48 @@ class MoodleCourse {
     List<MoodleItem>? items,
     this.isLoadingContents = false,
     this.scanError,
+    this.isHidden = false,
   }) : items = items ?? [];
+
+  int get deadlinesCount => items.where((i) => i.hasDeadline).length;
+
+  int get urgentDeadlinesCount => items.where((i) => i.isUrgentDeadline).length;
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'fullname': fullname,
+        'clean_name': cleanName,
+        'shortname': shortname,
+        'url': url,
+        'obsidian_folder': obsidianFolder,
+        'target_subfolder': targetSubfolder,
+        'organize_by_section': organizeBySection,
+        'is_hidden': isHidden,
+        'items': items.map((e) => e.toJson()).toList(),
+      };
+
+  factory MoodleCourse.fromJson(Map<String, dynamic> json) {
+    final rawItems = json['items'];
+    final parsedItems = rawItems is List
+        ? rawItems
+            .whereType<Map>()
+            .map((m) => MoodleItem.fromJson(Map<String, dynamic>.from(m)))
+            .toList()
+        : <MoodleItem>[];
+    return MoodleCourse(
+      id: (json['id'] as num?)?.toInt() ?? 0,
+      fullname: json['fullname']?.toString() ?? '',
+      cleanName: json['clean_name']?.toString() ??
+          cleanCourseName(json['fullname']?.toString() ?? ''),
+      shortname: json['shortname']?.toString() ?? '',
+      url: json['url']?.toString() ?? '',
+      obsidianFolder: json['obsidian_folder']?.toString() ?? '',
+      targetSubfolder: json['target_subfolder']?.toString() ?? 'Aula',
+      organizeBySection: json['organize_by_section'] != false,
+      items: parsedItems,
+      isHidden: json['is_hidden'] == true,
+    );
+  }
 
   int get downloadableCount => items.where((i) => i.downloadable).length;
 

@@ -8,9 +8,10 @@ let latestUpdateInfo = null;
 let autoCheckUpdatesEnabled = true;
 let startupUpdateChecked = false;
 
-document.addEventListener('DOMContentLoaded', () => {
-    loadSettings();
-    checkSession(true);
+document.addEventListener('DOMContentLoaded', async () => {
+    await loadSettings();
+    await loadCachedScan();
+    await checkSession(true);
 });
 
 function showBanner(msg, type = 'info') {
@@ -40,6 +41,11 @@ async function loadSettings() {
     try {
         const res = await fetch('/api/settings');
         const data = await res.json();
+        populateSettingsUI(data);
+        if (data.default_tab) {
+            currentFilter = data.default_tab;
+            updateActiveTabUI(currentFilter);
+        }
         if (data.download_root) {
             document.getElementById('input-download-root').value = data.download_root;
             const settingsRootEl = document.getElementById('settings-download-root');
@@ -233,7 +239,8 @@ async function checkForAppUpdates(silent = false) {
     }
 
     try {
-        const res = await fetch('/api/updates/check');
+        const betaFlag = document.getElementById('toggle-beta-updates')?.checked ? 'true' : 'false';
+        const res = await fetch(`/api/updates/check?beta=${betaFlag}`);
         const data = await res.json();
         latestUpdateInfo = data;
         renderUpdateCheckResult(data, silent);
@@ -278,7 +285,8 @@ async function applyAppUpdate() {
             body: JSON.stringify({
                 download_url: latestUpdateInfo.asset.download_url,
                 asset_name: latestUpdateInfo.asset.name,
-                size: latestUpdateInfo.asset.size || 0
+                size: latestUpdateInfo.asset.size || 0,
+                sha256: latestUpdateInfo.asset.sha256 || ''
             })
         });
 
@@ -355,10 +363,11 @@ async function saveDownloadRootManual() {
         const data = await res.json();
         if (res.ok) {
             input.value = data.download_root;
+            populateSettingsUI(data);
             updateExistingFoldersDatalist(data.existing_subfolders || []);
             showBanner(`Carpeta de guardado actualizada: ${data.download_root}`, 'success');
             if (lastScanData) {
-                await scanAula();
+                await rescanLocalFolder();
             }
         }
     } catch (e) {
@@ -515,11 +524,353 @@ async function logoutSession() {
     showBanner('Sesion cerrada.', 'info');
 }
 
+let currentScanRequestController = null;
+let currentSearchQuery = '';
+let currentExtFilter = '';
+let showHiddenCourses = false;
+let lastScanIsCache = false;
+let appSettings = {
+    theme_mode: 'dark',
+    accent_color: 'blue',
+    default_tab: 'new',
+    default_subfolder: '',
+    default_organize_by_section: true,
+    skip_already_downloaded: true,
+    skip_seen_on_select: true,
+    auto_export_links_to_obsidian: true,
+    auto_export_forums_to_obsidian: true,
+    hide_empty_sections: true,
+    preferred_extensions: [],
+    max_auto_select_mb: 0,
+    beta_updates_channel: false,
+    notify_native_enabled: true,
+    notify_on_new_files: true,
+    notify_on_download_done: true,
+    notify_on_deadlines: true,
+    background_sync_hours: 0,
+    minimize_to_tray: false,
+    hidden_courses: []
+};
+
+function resolveThemeMode(mode) {
+    if (mode === 'system') {
+        return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+            ? 'dark'
+            : 'light';
+    }
+    return mode === 'light' ? 'light' : 'dark';
+}
+
+function applyAppTheme(themeMode, accentColor) {
+    const html = document.documentElement;
+    html.setAttribute('data-theme', resolveThemeMode(themeMode || 'dark'));
+    html.setAttribute('data-accent', accentColor || 'blue');
+    document.querySelectorAll('.accent-swatch').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.accent === (accentColor || 'blue'));
+    });
+}
+
+function updateNotificationBadge(count) {
+    const num = Number(count || 0);
+    const badge = document.getElementById('notif-badge');
+    const modalCount = document.getElementById('notif-modal-count');
+    if (badge) {
+        badge.textContent = num > 99 ? '99+' : String(num);
+        badge.classList.toggle('hidden', num <= 0);
+    }
+    if (modalCount) {
+        modalCount.textContent = `${num} sin leer`;
+    }
+}
+
+function populateSettingsUI(data) {
+    appSettings = { ...appSettings, ...(data || {}) };
+    applyAppTheme(appSettings.theme_mode, appSettings.accent_color);
+    updateNotificationBadge(appSettings.unread_notifications);
+
+    const setVal = (id, val) => { const el = document.getElementById(id); if (el) el.value = val; };
+    const setChecked = (id, val) => { const el = document.getElementById(id); if (el) el.checked = Boolean(val); };
+
+    setVal('settings-download-root', appSettings.download_root || '');
+    setVal('settings-default-subfolder', appSettings.default_subfolder || '');
+    setVal('select-theme-mode', appSettings.theme_mode || 'dark');
+    setVal('select-default-tab', appSettings.default_tab || 'new');
+    setVal('input-max-auto-mb', appSettings.max_auto_select_mb || 0);
+    setVal('select-bg-sync-hours', String(appSettings.background_sync_hours || 0));
+
+    setChecked('toggle-default-org-sec', appSettings.default_organize_by_section);
+    setChecked('toggle-skip-downloaded', appSettings.skip_already_downloaded);
+    setChecked('toggle-skip-seen', appSettings.skip_seen_on_select);
+    setChecked('toggle-export-links', appSettings.auto_export_links_to_obsidian);
+    setChecked('toggle-export-forums', appSettings.auto_export_forums_to_obsidian);
+    setChecked('toggle-hide-empty-sec', appSettings.hide_empty_sections);
+    setChecked('toggle-minimize-tray', appSettings.minimize_to_tray);
+    setChecked('toggle-notify-native', appSettings.notify_native_enabled);
+    setChecked('toggle-notify-new', appSettings.notify_on_new_files);
+    setChecked('toggle-notify-deadlines', appSettings.notify_on_deadlines);
+    setChecked('toggle-notify-download', appSettings.notify_on_download_done);
+    setChecked('toggle-auto-updates', appSettings.auto_check_updates);
+    setChecked('toggle-beta-updates', appSettings.beta_updates_channel);
+
+    const prefSet = new Set((appSettings.preferred_extensions || []).map(e => String(e).toLowerCase()));
+    document.querySelectorAll('[data-pref-ext]').forEach(btn => {
+        btn.classList.toggle('active', prefSet.has(btn.dataset.prefExt));
+    });
+}
+
+async function saveSettingField(patch) {
+    try {
+        const res = await fetch('/api/settings', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(patch)
+        });
+        if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.detail || 'Error al guardar configuracion');
+        }
+        const data = await res.json();
+        populateSettingsUI(data);
+        return data;
+    } catch (e) {
+        showBanner(`Error guardando configuracion: ${e.message}`, 'error');
+        return null;
+    }
+}
+
+function onThemePreferenceChange(themeMode, accentColor) {
+    const patch = {};
+    if (themeMode) {
+        appSettings.theme_mode = themeMode;
+        patch.theme_mode = themeMode;
+    }
+    if (accentColor) {
+        appSettings.accent_color = accentColor;
+        patch.accent_color = accentColor;
+    }
+    applyAppTheme(appSettings.theme_mode, appSettings.accent_color);
+    saveSettingField(patch);
+}
+
+function togglePreferredExtension(ext) {
+    const clean = String(ext || '').toLowerCase();
+    const current = new Set((appSettings.preferred_extensions || []).map(e => String(e).toLowerCase()));
+    if (current.has(clean)) current.delete(clean);
+    else current.add(clean);
+    saveSettingField({ preferred_extensions: Array.from(current) });
+}
+
+function switchSettingsTab(tabKey) {
+    document.querySelectorAll('[data-settings-tab]').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.settingsTab === tabKey);
+    });
+    document.querySelectorAll('.settings-pane').forEach(pane => {
+        pane.classList.toggle('hidden', pane.id !== `settings-pane-${tabKey}`);
+    });
+}
+
+function switchQrTab(tabKey) {
+    document.querySelectorAll('[data-qr-tab]').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.qrTab === tabKey);
+    });
+    const webPane = document.getElementById('qr-tab-web');
+    const pairPane = document.getElementById('qr-tab-pair');
+    if (webPane) webPane.classList.toggle('hidden', tabKey !== 'web');
+    if (pairPane) pairPane.classList.toggle('hidden', tabKey !== 'pair');
+    if (tabKey === 'pair') {
+        createPairingSession();
+    }
+}
+
+async function createPairingSession() {
+    const loading = document.getElementById('pair-loading');
+    const content = document.getElementById('pair-content');
+    const errorBox = document.getElementById('pair-error');
+    if (loading) loading.classList.remove('hidden');
+    if (content) content.classList.add('hidden');
+    if (errorBox) errorBox.classList.add('hidden');
+
+    try {
+        const res = await fetch('/api/pair/create', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'No se pudo generar codigo de emparejamiento');
+
+        const qrImg = document.getElementById('pair-qr-img');
+        const pinEl = document.getElementById('pair-pin-code');
+        const expEl = document.getElementById('pair-expiry');
+        const urlEl = document.getElementById('pair-base-url');
+        if (qrImg) qrImg.src = `data:image/png;base64,${data.qr_b64}`;
+        if (pinEl) pinEl.textContent = data.pin;
+        if (expEl) expEl.textContent = 'Valido por 5 minutos (un solo uso)';
+        if (urlEl) urlEl.textContent = data.base_url;
+        if (content) content.classList.remove('hidden');
+    } catch (e) {
+        if (errorBox) {
+            errorBox.textContent = e.message;
+            errorBox.classList.remove('hidden');
+        }
+    } finally {
+        if (loading) loading.classList.add('hidden');
+    }
+}
+
+function applyScanPayload(data, isCache = false) {
+    lastScanData = data;
+    lastScanIsCache = Boolean(isCache);
+    if (!isCache) selectedItemsMap.clear();
+
+    if (data.download_root) {
+        const rootInput = document.getElementById('input-download-root');
+        if (rootInput) rootInput.value = data.download_root;
+        const settingsRoot = document.getElementById('settings-download-root');
+        if (settingsRoot) settingsRoot.value = data.download_root;
+    }
+    updateExistingFoldersDatalist(data.existing_subfolders || []);
+
+    const summary = data.summary || {};
+    document.getElementById('scan-toolbar').classList.remove('hidden');
+    document.getElementById('stat-courses').textContent = summary.total_courses ?? (data.courses || []).length;
+    document.getElementById('stat-new').textContent = summary.total_new_files ?? 0;
+    document.getElementById('stat-total').textContent = summary.total_files ?? 0;
+
+    const dlBadge = document.getElementById('deadlines-tab-badge');
+    const urgentCount = summary.upcoming_deadlines_count ?? 0;
+    if (dlBadge) {
+        dlBadge.textContent = String(urgentCount);
+        dlBadge.classList.toggle('hidden', urgentCount <= 0);
+    }
+
+    if (typeof data.unread_notifications === 'number') {
+        updateNotificationBadge(data.unread_notifications);
+    }
+
+    renderCourses();
+    updateDownloadBar();
+}
+
+async function loadCachedScan() {
+    try {
+        const res = await fetch('/api/scan/cached');
+        if (!res.ok) return false;
+        const data = await res.json();
+        if (data.has_cache && Array.isArray(data.courses) && data.courses.length > 0) {
+            applyScanPayload(data, true);
+            showBanner('Mostrando cache local • Actualizando desde Aula USM...', 'info');
+            return true;
+        }
+    } catch (_e) {
+        // Ignorar errores de cache inicial
+    }
+    return false;
+}
+
+async function rescanLocalFolder() {
+    const btn = document.getElementById('btn-rescan-local');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Escaneando...';
+    }
+    try {
+        const res = await fetch('/api/rescan-local', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Error re-escaneando carpeta');
+        if (!data.has_cache) {
+            showBanner('Primero sincroniza Aula USM para contrastar archivos con la carpeta.', 'info');
+            return;
+        }
+        applyScanPayload(data, false);
+        const present = (data.summary?.total_files || 0) - (data.summary?.total_new_files || 0);
+        showBanner(
+            `Carpeta re-escaneada: ${present} archivo(s) detectados localmente, ${data.summary?.total_new_files || 0} pendientes.`,
+            'success'
+        );
+    } catch (e) {
+        showBanner(`Error re-escaneando carpeta: ${e.message}`, 'error');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Re-escanear carpeta';
+        }
+    }
+}
+
+async function openLocalFile(path, reveal = false) {
+    try {
+        const res = await fetch('/api/open-file', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ path, reveal })
+        });
+        if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.detail || 'No se pudo abrir el archivo local');
+        }
+    } catch (e) {
+        showBanner(e.message, 'error');
+    }
+}
+
+async function openNotificationsModal() {
+    toggleModal('notifications-modal');
+    await loadNotificationsList();
+}
+
+async function loadNotificationsList() {
+    const listEl = document.getElementById('notifications-list');
+    try {
+        const res = await fetch('/api/notifications');
+        const data = await res.json();
+        updateNotificationBadge(data.unread_count || 0);
+        const items = data.notifications || [];
+        if (!items.length) {
+            if (listEl) listEl.innerHTML = `<div class="muted center" style="padding:20px;">No hay notificaciones recientes.</div>`;
+            return;
+        }
+        if (listEl) {
+            listEl.innerHTML = items.map(n => {
+                const when = n.created_at ? new Date(n.created_at * 1000).toLocaleString() : '';
+                return `
+                    <div class="notif-card ${n.read ? '' : 'unread'}">
+                        <div class="notif-card-head">
+                            <span class="notif-title">${escapeHtml(n.title || 'Aviso')}</span>
+                            <span class="notif-time">${escapeHtml(when)}</span>
+                        </div>
+                        <div class="notif-body">${escapeHtml(n.body || '')}</div>
+                    </div>`;
+            }).join('');
+        }
+    } catch (e) {
+        if (listEl) listEl.innerHTML = `<div class="muted center">Error cargando avisos: ${escapeHtml(e.message)}</div>`;
+    }
+}
+
+async function markAllNotificationsRead() {
+    const res = await fetch('/api/notifications/read-all', { method: 'POST' });
+    if (res.ok) await loadNotificationsList();
+}
+
+async function clearAllNotifications() {
+    const res = await fetch('/api/notifications', { method: 'DELETE' });
+    if (res.ok) await loadNotificationsList();
+}
+
+async function sendTestNotification() {
+    const res = await fetch('/api/notifications/test', { method: 'POST' });
+    if (res.ok) {
+        const data = await res.json();
+        updateNotificationBadge(data.unread_count || 0);
+        await loadNotificationsList();
+        showBanner('Notificacion de prueba enviada.', 'success');
+    }
+}
+
 async function scanAula() {
     const btn = document.getElementById('btn-scan');
     btn.disabled = true;
     btn.textContent = 'Cargando...';
-    showBanner('Consultando cursos y archivos en Aula USM...', 'info');
+    if (!lastScanIsCache) {
+        showBanner('Consultando cursos y archivos en Aula USM...', 'info');
+    }
 
     try {
         const res = await fetch('/api/scan');
@@ -535,26 +886,12 @@ async function scanAula() {
         }
 
         const data = await res.json();
-        lastScanData = data;
-        selectedItemsMap.clear();
-
-        if (data.download_root) {
-            document.getElementById('input-download-root').value = data.download_root;
-        }
-        updateExistingFoldersDatalist(data.existing_subfolders || []);
-
-        document.getElementById('scan-toolbar').classList.remove('hidden');
-        document.getElementById('stat-courses').textContent = data.summary.total_courses;
-        document.getElementById('stat-new').textContent = data.summary.total_new_files;
-        document.getElementById('stat-total').textContent = data.summary.total_files;
+        applyScanPayload(data, false);
 
         showBanner(
             `Listo: ${data.summary.total_courses} cursos cargados (${data.summary.total_files} archivos, ${data.summary.total_new_files} pendientes). Haz clic en un ramo para desplegar sus carpetas.`,
             'success'
         );
-
-        renderCourses();
-        updateDownloadBar();
     } catch (e) {
         showBanner(`Error al consultar Aula USM: ${e.message}`, 'error');
     } finally {
@@ -564,7 +901,7 @@ async function scanAula() {
 }
 
 function updateActiveTabUI(filter) {
-    document.querySelectorAll('.tab-btn').forEach(btn => {
+    document.querySelectorAll('.tab-btn[data-filter]').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.filter === filter);
     });
 }
@@ -575,9 +912,42 @@ function setFilter(filter) {
     renderCourses();
 }
 
+function setSearchQuery(q) {
+    currentSearchQuery = (q || '').trim().toLowerCase();
+    renderCourses();
+}
+
+function setExtensionFilter(ext) {
+    currentExtFilter = (ext || '').trim().toLowerCase();
+    document.querySelectorAll('#ext-filter-chips .chip-btn').forEach(btn => {
+        btn.classList.toggle('active', (btn.dataset.ext || '') === currentExtFilter);
+    });
+    renderCourses();
+}
+
+function toggleShowHiddenCourses() {
+    showHiddenCourses = !showHiddenCourses;
+    const btn = document.getElementById('btn-toggle-hidden-courses');
+    if (btn) {
+        btn.textContent = showHiddenCourses ? 'Ocultar archivados' : 'Ver ocultos';
+        btn.classList.toggle('active', showHiddenCourses);
+    }
+    renderCourses();
+}
+
+async function toggleCourseHidden(courseId, hide) {
+    const data = await saveSettingField({ course_id: courseId, course_hidden: Boolean(hide) });
+    if (data && lastScanData && Array.isArray(lastScanData.courses)) {
+        lastScanData.courses.forEach(c => {
+            if (c.course && c.course.id === courseId) c.course.is_hidden = Boolean(hide);
+        });
+        renderCourses();
+    }
+}
+
 function toggleCourse(courseId, event) {
-    // Evitar colapsar si el usuario hizo clic en un input dentro de la cabecera
-    if (event && (event.target.tagName === 'INPUT' || event.target.tagName === 'LABEL')) {
+    // Evitar colapsar si el usuario hizo clic en un input o boton dentro de la cabecera
+    if (event && (event.target.tagName === 'INPUT' || event.target.tagName === 'LABEL' || event.target.tagName === 'BUTTON')) {
         return;
     }
     if (expandedCourses.has(courseId)) {
@@ -600,6 +970,75 @@ function toggleSection(sectionKey, event) {
     renderCourses();
 }
 
+function formatDeadlineCountdown(dueTs) {
+    if (!dueTs) return { label: 'Sin fecha', cls: 'upcoming' };
+    const diffSec = dueTs - Math.floor(Date.now() / 1000);
+    if (diffSec < 0) return { label: 'Vencida', cls: 'overdue' };
+    const hours = Math.floor(diffSec / 3600);
+    if (hours < 24) {
+        const hrsText = hours <= 1 ? '< 1h' : `${hours}h`;
+        return { label: `Hoy (${hrsText})`, cls: 'today' };
+    }
+    if (hours <= 48) {
+        return { label: `< 48h (${Math.ceil(hours)}h)`, cls: 'urgent' };
+    }
+    const days = Math.ceil(hours / 24);
+    return { label: `En ${days} dias`, cls: 'upcoming' };
+}
+
+function renderDeadlinesTab(container) {
+    const entries = [];
+    const hiddenSet = new Set(appSettings.hidden_courses || []);
+
+    (lastScanData.courses || []).forEach(courseEntry => {
+        const course = courseEntry.course || {};
+        if (!showHiddenCourses && (course.is_hidden || hiddenSet.has(course.id))) return;
+        const cTitle = course.clean_name || course.fullname || 'Ramo';
+        (courseEntry.items || []).forEach(item => {
+            if (item.type !== 'assign' && item.type !== 'quiz') return;
+            const hay = `${cTitle} ${item.title || ''} ${item.due_text || ''}`.toLowerCase();
+            if (currentSearchQuery && !hay.includes(currentSearchQuery)) return;
+            entries.push({ course: cTitle, item });
+        });
+    });
+
+    entries.sort((a, b) => {
+        const tsA = a.item.due_timestamp || 9e15;
+        const tsB = b.item.due_timestamp || 9e15;
+        return tsA - tsB;
+    });
+
+    if (!entries.length) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <p>No se encontraron entregas ni evaluaciones proximas.</p>
+            </div>`;
+        return;
+    }
+
+    const wrapper = document.createElement('div');
+    wrapper.className = 'deadlines-container';
+    wrapper.innerHTML = entries.map(({ course, item }) => {
+        const status = formatDeadlineCountdown(item.due_timestamp);
+        const typeText = item.type === 'quiz' ? 'Cuestionario / Certamen' : 'Tarea / Entrega';
+        const dueLabel = item.due_text ? `${item.due_text}` : 'Sin fecha limite';
+        const urgencyCard = status.cls === 'urgent' || status.cls === 'today' ? 'urgent' : '';
+        return `
+            <div class="deadline-card ${urgencyCard}">
+                <div class="deadline-meta">
+                    <span class="deadline-course">${escapeHtml(course)} • ${escapeHtml(typeText)}</span>
+                    <span class="deadline-title">${escapeHtml(item.title || '')}</span>
+                    <span class="muted">${escapeHtml(dueLabel)}</span>
+                </div>
+                <div class="deadline-actions">
+                    <span class="deadline-badge ${status.cls}">${escapeHtml(status.label)}</span>
+                    <a href="${item.url}" target="_blank" class="btn btn-outline btn-xs">Ir al Aula</a>
+                </div>
+            </div>`;
+    }).join('');
+    container.appendChild(wrapper);
+}
+
 function renderCourses() {
     const container = document.getElementById('courses-container');
     if (!lastScanData || !lastScanData.courses.length) {
@@ -607,6 +1046,11 @@ function renderCourses() {
             <div class="empty-state">
                 <p>No se encontraron cursos activos en la cuenta.</p>
             </div>`;
+        return;
+    }
+
+    if (currentFilter === 'deadlines') {
+        renderDeadlinesTab(container);
         return;
     }
 
@@ -618,15 +1062,33 @@ function renderCourses() {
     });
 
     container.innerHTML = '';
+    const hiddenSet = new Set(appSettings.hidden_courses || []);
 
     lastScanData.courses.forEach(courseEntry => {
         const course = courseEntry.course;
+        const isCourseHidden = Boolean(course.is_hidden || hiddenSet.has(course.id));
+        if (isCourseHidden && !showHiddenCourses) {
+            return;
+        }
+
         const allItems = courseEntry.items || [];
         const isCourseExpanded = expandedCourses.has(course.id);
+        const courseSearchMatch = currentSearchQuery
+            ? (course.fullname || '').toLowerCase().includes(currentSearchQuery) ||
+              (course.clean_name || '').toLowerCase().includes(currentSearchQuery)
+            : true;
 
         const filteredItems = allItems.filter(item => {
-            if (currentFilter === 'new') return item.downloadable && !item.is_downloaded;
-            if (currentFilter === 'files') return item.downloadable;
+            if (currentFilter === 'new' && !(item.downloadable && !item.is_downloaded)) return false;
+            if (currentFilter === 'files' && !item.downloadable) return false;
+            if (currentExtFilter) {
+                const ext = (item.file_ext || '').toLowerCase();
+                if (ext !== currentExtFilter) return false;
+            }
+            if (currentSearchQuery && !courseSearchMatch) {
+                const hay = `${item.title || ''} ${item.section || ''} ${item.file_name || ''}`.toLowerCase();
+                if (!hay.includes(currentSearchQuery)) return false;
+            }
             return true;
         });
 
@@ -654,6 +1116,7 @@ function renderCourses() {
             sectionsHtml = `<div class="muted" style="padding:10px;">Sin elementos para este filtro.</div>`;
         } else {
             sectionsMap.forEach((secItems, secName) => {
+                if (appSettings.hide_empty_sections && secItems.length === 0) return;
                 const sectionKey = `${course.id}::${secName}`;
                 const isSecExpanded = expandedSections.has(sectionKey);
 
@@ -663,7 +1126,7 @@ function renderCourses() {
                 let rowsHtml = '';
                 secItems.forEach(item => {
                     const isChecked = selectedItemsMap.has(item.id);
-                    const typeLabel = item.type === 'file' ? 'Archivo' : (item.type === 'assignment' ? 'Tarea' : (item.type === 'forum' ? 'Foro' : 'Enlace'));
+                    const typeLabel = item.type === 'file' ? 'Archivo' : (item.type === 'quiz' ? 'Evaluacion' : (item.type === 'assign' || item.type === 'assignment' ? 'Tarea' : (item.type === 'forum' ? 'Foro' : 'Enlace')));
 
                     let statusBadge = '';
                     if (item.downloadable) {
@@ -674,6 +1137,10 @@ function renderCourses() {
                         statusBadge = `<span class="badge badge-type">${typeLabel}</span>`;
                     }
 
+                    const dueBadge = (!item.downloadable && item.due_text)
+                        ? `<span class="badge badge-size">${escapeHtml(item.due_text)}</span>`
+                        : '';
+
                     const sizeBadge = (item.downloadable && item.size_human)
                         ? `<span class="badge badge-size">${escapeHtml(item.size_human)}</span>`
                         : '';
@@ -682,6 +1149,11 @@ function renderCourses() {
                         ? `<input type="checkbox" class="item-checkbox" data-id="${item.id}" ${isChecked ? 'checked' : ''} onchange="toggleItemSelection('${item.id}', ${course.id}, this.checked)" />`
                         : `<span style="width:14px; display:inline-block;"></span>`;
 
+                    const openBtnsHtml = (item.is_downloaded && item.local_path)
+                        ? `<button type="button" class="btn btn-outline btn-xs" onclick="openLocalFile('${escapeJs(item.local_path)}', false)">Abrir</button>
+                           <button type="button" class="btn btn-outline btn-xs" onclick="openLocalFile('${escapeJs(item.local_path)}', true)" title="Mostrar en el Explorador">Carpeta</button>`
+                        : `<a href="${item.url}" target="_blank" class="btn btn-outline btn-xs">Abrir</a>`;
+
                     rowsHtml += `
                         <div class="item-row">
                             <div class="item-left">
@@ -689,9 +1161,10 @@ function renderCourses() {
                                 <span class="item-title" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</span>
                             </div>
                             <div class="item-badges">
+                                ${dueBadge}
                                 ${sizeBadge}
                                 ${statusBadge}
-                                <a href="${item.url}" target="_blank" class="btn btn-outline btn-xs">Abrir</a>
+                                ${openBtnsHtml}
                             </div>
                         </div>`;
                 });
@@ -719,12 +1192,22 @@ function renderCourses() {
 
         const pillClass = courseEntry.new_files_count > 0 ? 'course-summary-pill has-new' : 'course-summary-pill';
         const displayTitle = course.clean_name || course.fullname;
+        const targetSubVal = typeof course.target_subfolder === 'string'
+            ? course.target_subfolder
+            : (appSettings.default_subfolder || '');
+        const orgSectionVal = typeof course.organize_by_section === 'boolean'
+            ? course.organize_by_section
+            : Boolean(appSettings.default_organize_by_section);
+        const hiddenBadge = isCourseHidden
+            ? `<span class="course-hidden-badge">Oculto</span>`
+            : '';
 
         card.innerHTML = `
             <div class="course-header" onclick="toggleCourse(${course.id}, event)">
                 <div class="course-header-left">
                     <span class="chevron">&#9654;</span>
                     <span class="course-title" title="${escapeHtml(course.fullname)}">${escapeHtml(displayTitle)}</span>
+                    ${hiddenBadge}
                 </div>
                 <div class="course-header-right">
                     <span class="folder-tag" title="Carpeta destino">${escapeHtml(course.obsidian_folder)}</span>
@@ -753,12 +1236,12 @@ function renderCourses() {
                             type="text"
                             id="${subInputId}"
                             class="course-sub-input"
-                            value="Aula"
+                            value="${escapeHtml(targetSubVal)}"
                             placeholder="Opcional"
-                            onchange="updateCourseFolderConfig(${course.id})"
+                            onchange="updateCourseFolderConfig(${course.id}, true)"
                         />
                         <label style="display:inline-flex; align-items:center; gap:4px; cursor:pointer;">
-                            <input type="checkbox" id="${orgSectionId}" checked onchange="updateCourseFolderConfig(${course.id})" />
+                            <input type="checkbox" id="${orgSectionId}" ${orgSectionVal ? 'checked' : ''} onchange="updateCourseFolderConfig(${course.id}, true)" />
                             Subcarpeta por seccion
                         </label>
                     </div>
@@ -768,6 +1251,9 @@ function renderCourses() {
                         </button>
                         <button class="btn btn-outline btn-xs" onclick="toggleCourseSelection(${course.id}, false)" title="Deseleccionar archivos de este ramo">
                             Desmarcar
+                        </button>
+                        <button class="btn btn-outline btn-xs" onclick="toggleCourseHidden(${course.id}, ${!isCourseHidden})" title="${isCourseHidden ? 'Volver a mostrar ramo' : 'Ocultar este ramo'}">
+                            ${isCourseHidden ? 'Mostrar' : 'Ocultar'}
                         </button>
                     </div>
                 </div>
@@ -830,16 +1316,29 @@ function getCourseConfig(courseId) {
     const orgEl = document.getElementById(`org_${courseId}`);
     const entry = lastScanData ? lastScanData.courses.find(c => c.course.id === courseId) : null;
     const defaultFolder = entry ? entry.course.obsidian_folder : 'Curso';
+    const fallbackSub = entry && typeof entry.course.target_subfolder === 'string'
+        ? entry.course.target_subfolder
+        : (appSettings.default_subfolder || '');
+    const fallbackOrg = entry && typeof entry.course.organize_by_section === 'boolean'
+        ? entry.course.organize_by_section
+        : Boolean(appSettings.default_organize_by_section);
 
     return {
         obsidian_folder: folderEl ? folderEl.value.trim() || defaultFolder : defaultFolder,
-        target_subfolder: subEl ? subEl.value.trim() : 'Aula',
-        organize_by_section: orgEl ? orgEl.checked : true
+        target_subfolder: subEl ? subEl.value.trim() : fallbackSub,
+        organize_by_section: orgEl ? orgEl.checked : fallbackOrg
     };
 }
 
-function updateCourseFolderConfig(courseId) {
+function updateCourseFolderConfig(courseId, persist = false) {
     const cfg = getCourseConfig(courseId);
+    if (lastScanData) {
+        const entry = lastScanData.courses.find(c => c.course.id === courseId);
+        if (entry) {
+            entry.course.target_subfolder = cfg.target_subfolder;
+            entry.course.organize_by_section = cfg.organize_by_section;
+        }
+    }
     selectedItemsMap.forEach((val, key) => {
         const found = findItemById(key);
         if (found && found.course.id === courseId) {
@@ -848,6 +1347,13 @@ function updateCourseFolderConfig(courseId) {
             val.organize_by_section = cfg.organize_by_section;
         }
     });
+    if (persist) {
+        saveSettingField({
+            course_id: courseId,
+            course_subfolder: cfg.target_subfolder,
+            course_organize_by_section: cfg.organize_by_section
+        });
+    }
 }
 
 function toggleItemSelection(itemId, courseId, isChecked) {
@@ -922,17 +1428,33 @@ function toggleCourseSelection(courseId, isSelectAll) {
 
 function selectAllNew() {
     if (!lastScanData) return;
+    const hiddenSet = new Set(appSettings.hidden_courses || []);
+    const prefExts = new Set((appSettings.preferred_extensions || []).map(e => String(e).toLowerCase()));
+    const maxBytes = (appSettings.max_auto_select_mb || 0) > 0
+        ? appSettings.max_auto_select_mb * 1024 * 1024
+        : 0;
+    const skipSeen = Boolean(appSettings.skip_seen_on_select);
+    const skipDownloaded = appSettings.skip_already_downloaded !== false;
+
     lastScanData.courses.forEach(c => {
+        if (!showHiddenCourses && (c.course.is_hidden || hiddenSet.has(c.course.id))) return;
         const cfg = getCourseConfig(c.course.id);
         c.items.forEach(item => {
-            if (item.downloadable && !item.is_downloaded) {
-                selectedItemsMap.set(item.id, {
-                    ...item,
-                    obsidian_folder: cfg.obsidian_folder,
-                    target_subfolder: cfg.target_subfolder,
-                    organize_by_section: cfg.organize_by_section
-                });
+            if (!item.downloadable) return;
+            if (skipDownloaded && item.is_downloaded) return;
+            if (skipSeen && item.seen && !item.is_downloaded) return;
+            if (prefExts.size > 0) {
+                const ext = (item.file_ext || '').toLowerCase();
+                if (!prefExts.has(ext)) return;
             }
+            if (maxBytes > 0 && item.size_bytes && item.size_bytes > maxBytes) return;
+
+            selectedItemsMap.set(item.id, {
+                ...item,
+                obsidian_folder: cfg.obsidian_folder,
+                target_subfolder: cfg.target_subfolder,
+                organize_by_section: cfg.organize_by_section
+            });
         });
     });
     renderCourses();
@@ -1048,7 +1570,9 @@ async function downloadSelected() {
         url: i.url,
         obsidian_folder: i.obsidian_folder,
         target_subfolder: i.target_subfolder,
-        organize_by_section: i.organize_by_section
+        organize_by_section: i.organize_by_section,
+        file_name: i.file_name || '',
+        type: i.type || 'file'
     }));
 
     try {
@@ -1098,6 +1622,7 @@ async function downloadSelected() {
                                     if (item.id === data.item_id) {
                                         item.is_downloaded = true;
                                         item.is_new = false;
+                                        if (data.saved_path) item.local_path = data.saved_path;
                                         selectedItemsMap.delete(item.id);
                                     }
                                 });
@@ -1115,9 +1640,15 @@ async function downloadSelected() {
                         detailsText.textContent = `¡Completado! ${data.downloaded_count} archivo(s) guardados.`;
                         currentFileEl.textContent = 'Finalizado';
 
+                        if (typeof data.unread_notifications === 'number') {
+                            updateNotificationBadge(data.unread_notifications);
+                        }
                         const firstSaved = data.downloaded && data.downloaded[0] ? data.downloaded[0].saved_path : '';
                         const folderNotice = firstSaved ? ` en: ${firstSaved.substring(0, firstSaved.lastIndexOf('\\'))}` : '';
                         showBanner(`✅ ${data.downloaded_count} archivo(s) descargados exitosamente${folderNotice}`, 'success');
+                        if (lastScanData) {
+                            rescanLocalFolder();
+                        }
                     }
                 } catch (parseErr) {
                     console.error('Error parseando SSE:', parseErr);

@@ -9,6 +9,8 @@ import 'package:aula_scrapt/services/settings_service.dart';
 import 'package:aula_scrapt/services/updater_service.dart';
 
 class _TestSettingsService extends SettingsService {
+  Map<String, dynamic>? _memoryCache;
+
   @override
   Future<bool> hasStoragePermission() async => true;
 
@@ -17,6 +19,43 @@ class _TestSettingsService extends SettingsService {
         'Ingeniería de Software',
         'Inteligencia Artificial',
       ];
+
+  @override
+  Future<Map<String, dynamic>?> loadScanCache() async => _memoryCache;
+
+  @override
+  Future<void> saveScanCache(List<MoodleCourse> courses) async {
+    _memoryCache = {
+      'cachedAt': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      'courses': courses,
+    };
+  }
+
+  @override
+  Future<bool> scheduleBackgroundSync(int intervalHours) async => true;
+
+  @override
+  Future<bool> hasNotificationPermission() async => true;
+
+  @override
+  Future<bool> requestNotificationPermission() async => true;
+
+  @override
+  Future<bool> showNativeNotification({
+    required String title,
+    required String body,
+    String channelId = 'new_resources',
+  }) async =>
+      true;
+
+  @override
+  Future<void> refreshSystemSeedColor() async {}
+
+  @override
+  Future<Map<String, dynamic>> loadSharedIndex() async => {};
+
+  @override
+  Future<void> recordSharedIndexEntries(List<Map<String, dynamic>> entries) async {}
 }
 
 class _FakeMoodleService extends MoodleService {
@@ -277,5 +316,112 @@ void main() {
     expect(find.text('v1.3.0'), findsOneWidget);
     expect(find.text('Descargar e instalar v1.3.0'), findsOneWidget);
     expect(find.text('Ver releases en GitHub'), findsOneWidget);
+  });
+
+  test('v1.3.0 helpers: normalizeMatchKey, parseDueTimestamp, inferFileExt & checksums', () {
+    expect(
+      MoodleService.normalizeMatchKey('Guía Nº 1 - Introducción_2026.PDF'),
+      'guia n 1 introduccion 2026',
+    );
+    expect(MoodleService.inferFileExt('Clase_01.pptx', 'Clase 01'), 'pptx');
+    expect(MoodleService.parseDueTimestamp('18 de noviembre de 2026, 23:59'), isNotNull);
+    expect(MoodleService.parseDueTimestamp('25/11/2026 18:30'), isNotNull);
+
+    final item = MoodleItem(
+      id: 'assign_42',
+      courseId: 101,
+      title: 'Entrega Final',
+      section: 'Evaluaciones',
+      type: 'assignment',
+      url: 'https://aula.usm.cl/mod/assign/view.php?id=42',
+      fileName: 'Entrega Final',
+      downloadable: false,
+      dueTimestamp: 1795046340,
+      dueText: '18/11/2026 23:59',
+    );
+    final course = MoodleCourse(
+      id: 101,
+      fullname: 'INF236',
+      cleanName: 'Ingeniería de Software',
+      shortname: 'INF236',
+      url: 'https://aula.usm.cl/course/view.php?id=101',
+      obsidianFolder: 'Ingeniería de Software',
+      items: [item],
+    );
+    final decoded = MoodleCourse.fromJson(course.toJson());
+    expect(decoded.id, 101);
+    expect(decoded.items.length, 1);
+    expect(decoded.items.first.dueTimestamp, 1795046340);
+
+    const sampleChecksums =
+        '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  Aula-Scrapt-Android.apk\n'
+        'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210 *Aula-Scrapt-Android-v7a.apk\n';
+    final parsedMap = UpdaterService.parseChecksumsText(sampleChecksums);
+    expect(
+      parsedMap['Aula-Scrapt-Android.apk'],
+      '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+    );
+
+    final picked = UpdaterService.selectAndroidAsset(
+      [
+        {
+          'name': 'Aula-Scrapt-Android.apk',
+          'browser_download_url': 'https://example.com/arm64.apk',
+          'size': 20 * 1024 * 1024,
+        },
+        {
+          'name': 'Aula-Scrapt-Android-v7a.apk',
+          'browser_download_url': 'https://example.com/v7a.apk',
+          'size': 18 * 1024 * 1024,
+        },
+      ],
+      ['armeabi-v7a'],
+      checksums: parsedMap,
+    );
+    expect(picked?.name, 'Aula-Scrapt-Android-v7a.apk');
+    expect(
+      picked?.sha256,
+      'fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210',
+    );
+  });
+
+  testWidgets('CoursesScreen v1.3.0 deadlines tab, notifications bell & settings sheet work cleanly',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues({
+      'settings_download_root': '/storage/emulated/0/Documents/Obsidian',
+    });
+    final settings = _TestSettingsService();
+    await tester.runAsync(() => settings.init());
+    await tester.runAsync(() => settings.addNotification(
+          title: 'Archivo de prueba',
+          body: 'Guia_01.pdf disponible',
+          kind: 'new_file',
+        ));
+    final moodle = _FakeMoodleService(settings);
+
+    tester.view.physicalSize = const Size(360, 780);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(AulaScraptApp(
+      moodleService: moodle,
+      settingsService: settings,
+    ));
+    await tester.pumpAndSettle();
+
+    // Cambiar a pestaña Entregas (asegurar visibilidad en viewport horizontal 360dp)
+    await tester.ensureVisible(find.text('Entregas'));
+    await tester.tap(find.text('Entregas'));
+    await tester.pumpAndSettle();
+    expect(find.text('Entrega Proyecto 1'), findsAtLeastNWidgets(1));
+
+    // Volver arriba para revelar el SliverAppBar y abrir el centro de notificaciones
+    await tester.drag(find.byType(CustomScrollView).first, const Offset(0, 300));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.notifications_outlined).first);
+    await tester.pumpAndSettle();
+    expect(find.text('Centro de avisos'), findsOneWidget);
+    expect(find.text('Archivo de prueba'), findsOneWidget);
   });
 }

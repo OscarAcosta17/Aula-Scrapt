@@ -20,12 +20,16 @@ DATA_DIR.mkdir(parents=True, exist_ok=True)
 SESSION_FILE = DATA_DIR / "session.json"
 HISTORY_FILE = DATA_DIR / "download_history.json"
 SETTINGS_FILE = DATA_DIR / "settings.json"
+SCAN_CACHE_FILE = DATA_DIR / "scan_cache.json"
+NOTIFICATIONS_FILE = DATA_DIR / "notifications.json"
+SHARED_INDEX_FILENAME = ".aula-scrapt-index.json"
 
 # Versión y repositorio oficial para verificación y actualización automática
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 GITHUB_REPO = "OscarAcosta17/Aula-Scrapt"
 GITHUB_RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases"
 GITHUB_LATEST_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+GITHUB_ALL_RELEASES_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases?per_page=10"
 
 # URLs de Aula USM
 AULA_BASE_URL = "https://aula.usm.cl"
@@ -104,24 +108,63 @@ def sanitize_folder_name(name: str) -> str:
     return clean or "Curso_Aula"
 
 
+def get_default_settings() -> Dict:
+    """Devuelve la estructura completa de configuración predeterminada."""
+    return {
+        "download_root": str(DEFAULT_DOWNLOAD_DIR),
+        "course_folders": {},
+        "course_subfolders": {},
+        "course_org_sections": {},
+        "hidden_courses": [],
+        "auto_check_updates": True,
+        "beta_updates_channel": False,
+        # Reglas globales de guardado
+        "default_subfolder": "Aula",
+        "default_organize_by_section": True,
+        "skip_already_downloaded": True,
+        "skip_seen_on_select": False,
+        "auto_export_links_to_obsidian": True,
+        "auto_export_forums_to_obsidian": True,
+        # Apariencia
+        "theme_mode": "dark",
+        "accent_color": "blue",
+        # Preferencias de visualización y filtros
+        "default_tab": "files",
+        "hide_empty_sections": True,
+        "preferred_extensions": [],
+        "max_auto_select_mb": 0,
+        # Notificaciones y segundo plano
+        "notify_native_enabled": True,
+        "notify_on_new_files": True,
+        "notify_on_download_done": True,
+        "notify_on_deadlines": True,
+        "background_sync_hours": 0,
+        "minimize_to_tray": False,
+    }
+
+
+def _apply_settings_defaults(data: Dict) -> Dict:
+    defaults = get_default_settings()
+    for key, default_val in defaults.items():
+        if key not in data or data[key] is None:
+            data[key] = default_val
+    if not str(data.get("download_root", "")).strip():
+        data["download_root"] = str(DEFAULT_DOWNLOAD_DIR)
+    return data
+
+
 def load_settings() -> Dict:
-    """Carga la configuración local del usuario (ruta de guardado, mapeo de carpetas y actualizaciones)."""
+    """Carga la configuración local del usuario con valores por defecto actualizados."""
     if SETTINGS_FILE.exists():
         try:
             with open(SETTINGS_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-                if "download_root" in data and data["download_root"]:
-                    data.setdefault("course_folders", {})
-                    data.setdefault("auto_check_updates", True)
-                    return data
+                if isinstance(data, dict):
+                    return _apply_settings_defaults(data)
         except Exception:
             pass
 
-    default_data = {
-        "download_root": str(DEFAULT_DOWNLOAD_DIR),
-        "course_folders": {},
-        "auto_check_updates": True,
-    }
+    default_data = get_default_settings()
     save_settings(default_data)
     return default_data
 
@@ -177,3 +220,29 @@ def resolve_course_folder(course_id: int, course_name: str) -> str:
             return folder
 
     return sanitize_folder_name(clean_name)
+
+
+def resolve_course_preferences(course_id: int, course_name: str) -> Dict:
+    """Devuelve carpeta, subcarpeta, organización por sección y visibilidad para un curso."""
+    settings = load_settings()
+    str_id = str(course_id)
+    course_subfolders = settings.get("course_subfolders", {})
+    course_org = settings.get("course_org_sections", {})
+    hidden = {int(c) for c in settings.get("hidden_courses", []) if str(c).isdigit()}
+
+    target_sub = (
+        course_subfolders[str_id]
+        if str_id in course_subfolders
+        else settings.get("default_subfolder", "Aula")
+    )
+    organize = (
+        bool(course_org[str_id])
+        if str_id in course_org
+        else bool(settings.get("default_organize_by_section", True))
+    )
+    return {
+        "obsidian_folder": resolve_course_folder(course_id, course_name),
+        "target_subfolder": str(target_sub),
+        "organize_by_section": organize,
+        "is_hidden": int(course_id) in hidden,
+    }

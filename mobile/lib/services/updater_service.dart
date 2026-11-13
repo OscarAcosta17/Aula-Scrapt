@@ -34,13 +34,23 @@ class GitHubReleaseAsset {
   final String downloadUrl;
   final int size;
   final String archTag;
+  final String? sha256;
 
   const GitHubReleaseAsset({
     required this.name,
     required this.downloadUrl,
     required this.size,
     required this.archTag,
+    this.sha256,
   });
+
+  GitHubReleaseAsset withSha256(String? checksum) => GitHubReleaseAsset(
+        name: name,
+        downloadUrl: downloadUrl,
+        size: size,
+        archTag: archTag,
+        sha256: checksum,
+      );
 
   String get sizeLabel {
     if (size <= 0) return '';
@@ -87,6 +97,8 @@ class UpdaterService {
   static const String githubRepo = 'OscarAcosta17/Aula-Scrapt';
   static const String latestApiUrl =
       'https://api.github.com/repos/$githubRepo/releases/latest';
+  static const String allReleasesApiUrl =
+      'https://api.github.com/repos/$githubRepo/releases?per_page=10';
   static const String releasesUrl =
       'https://github.com/$githubRepo/releases';
   static const MethodChannel _channel =
@@ -119,10 +131,27 @@ class UpdaterService {
     return r.patch > c.patch;
   }
 
+  /// Parsea un archivo `checksums.txt` (`<sha256>  <archivo>`) en mapa {nombre: hex}.
+  static Map<String, String> parseChecksumsText(String rawText) {
+    final map = <String, String>{};
+    for (final line in LineSplitter.split(rawText)) {
+      final match = RegExp(
+        r'^\s*([0-9a-fA-F]{64})\s+\*?([^\s/\\]+(?:/[^\s]+)?)\s*$',
+      ).firstMatch(line);
+      if (match != null) {
+        final hex = match.group(1)!.toLowerCase();
+        final fname = p.basename(match.group(2)!.trim());
+        if (fname.isNotEmpty) map[fname] = hex;
+      }
+    }
+    return map;
+  }
+
   static GitHubReleaseAsset? selectAndroidAsset(
     List<dynamic> rawAssets,
-    List<String> deviceAbis,
-  ) {
+    List<String> deviceAbis, {
+    Map<String, String> checksums = const {},
+  }) {
     final apks = <GitHubReleaseAsset>[];
     for (final entry in rawAssets) {
       if (entry is! Map) continue;
@@ -153,6 +182,7 @@ class UpdaterService {
           downloadUrl: url,
           size: size,
           archTag: archTag,
+          sha256: checksums[name],
         ),
       );
     }
@@ -186,8 +216,8 @@ class UpdaterService {
   Future<AppUpdateEnv> loadEnvironment() async {
     if (!Platform.isAndroid) {
       return const AppUpdateEnv(
-        currentVersion: '1.2.0',
-        versionCode: 3,
+        currentVersion: '1.3.0',
+        versionCode: 4,
         packageName: 'cl.usm.aulascrapt.aula_scrapt',
         abis: ['arm64-v8a'],
         sdkInt: 35,
@@ -201,10 +231,10 @@ class UpdaterService {
             ? rawAbis.map((e) => e.toString()).toList()
             : const <String>['arm64-v8a'];
         return AppUpdateEnv(
-          currentVersion: (info['versionName'] ?? '1.2.0').toString(),
+          currentVersion: (info['versionName'] ?? '1.3.0').toString(),
           versionCode: (info['versionCode'] is num)
               ? (info['versionCode'] as num).toInt()
-              : 3,
+              : 4,
           packageName: (info['packageName'] ?? 'cl.usm.aulascrapt.aula_scrapt')
               .toString(),
           abis: abis,
@@ -215,8 +245,8 @@ class UpdaterService {
       // Fallback limpio si corre fuera de contexto Android
     }
     return const AppUpdateEnv(
-      currentVersion: '1.2.0',
-      versionCode: 3,
+      currentVersion: '1.3.0',
+      versionCode: 4,
       packageName: 'cl.usm.aulascrapt.aula_scrapt',
       abis: ['arm64-v8a'],
       sdkInt: 35,
@@ -255,13 +285,16 @@ class UpdaterService {
     await _channel.invokeMethod('installApk', {'path': apkPath});
   }
 
-  Future<AppUpdateCheckResult> checkForUpdates() async {
+  Future<AppUpdateCheckResult> checkForUpdates({
+    bool includePrereleases = false,
+  }) async {
     final env = await loadEnvironment();
+    final endpoint = includePrereleases ? allReleasesApiUrl : latestApiUrl;
     http.Response response;
     try {
       response = await _httpClient
           .get(
-            Uri.parse(latestApiUrl),
+            Uri.parse(endpoint),
             headers: {
               'Accept': 'application/vnd.github+json',
               'User-Agent': 'Aula-Scrapt-Android/${env.currentVersion}',
@@ -336,7 +369,62 @@ class UpdaterService {
       );
     }
 
-    final data = json.decode(response.body) as Map<String, dynamic>;
+    Map<String, dynamic>? data;
+    final decoded = json.decode(response.body);
+    if (includePrereleases && decoded is List) {
+      final nonDrafts = decoded
+          .whereType<Map>()
+          .map((e) => Map<String, dynamic>.from(e))
+          .where((e) => e['draft'] != true)
+          .toList();
+      if (nonDrafts.isEmpty) {
+        return AppUpdateCheckResult(
+          ok: true,
+          noReleases: true,
+          updateAvailable: false,
+          currentVersion: env.currentVersion,
+          latestVersion: env.currentVersion,
+          tagName: 'v${env.currentVersion}',
+          releaseName: '',
+          publishedAt: '',
+          changelog: '',
+          htmlUrl: releasesUrl,
+          asset: null,
+          env: env,
+        );
+      }
+      nonDrafts.sort((a, b) {
+        final va = parseSemver((a['tag_name'] ?? '').toString());
+        final vb = parseSemver((b['tag_name'] ?? '').toString());
+        if (vb.major != va.major) return vb.major.compareTo(va.major);
+        if (vb.minor != va.minor) return vb.minor.compareTo(va.minor);
+        if (vb.patch != va.patch) return vb.patch.compareTo(va.patch);
+        final aPre = a['prerelease'] == true ? 1 : 0;
+        final bPre = b['prerelease'] == true ? 1 : 0;
+        return aPre.compareTo(bPre);
+      });
+      data = nonDrafts.first;
+    } else if (decoded is Map) {
+      data = Map<String, dynamic>.from(decoded);
+    }
+
+    if (data == null) {
+      return AppUpdateCheckResult(
+        ok: true,
+        noReleases: true,
+        updateAvailable: false,
+        currentVersion: env.currentVersion,
+        latestVersion: env.currentVersion,
+        tagName: 'v${env.currentVersion}',
+        releaseName: '',
+        publishedAt: '',
+        changelog: '',
+        htmlUrl: releasesUrl,
+        asset: null,
+        env: env,
+      );
+    }
+
     final tag = (data['tag_name'] ?? '').toString().trim();
     final latestClean =
         tag.replaceFirst(RegExp(r'^[vV]'), '').trim().isNotEmpty
@@ -345,7 +433,13 @@ class UpdaterService {
     final hasUpdate =
         tag.isNotEmpty && isNewerVersion(latestClean, env.currentVersion);
     final rawAssets = (data['assets'] as List?) ?? const [];
-    final matchedAsset = selectAndroidAsset(rawAssets, env.abis);
+
+    final checksums = await _fetchChecksumsMap(rawAssets, env.currentVersion);
+    final matchedAsset = selectAndroidAsset(
+      rawAssets,
+      env.abis,
+      checksums: checksums,
+    );
 
     return AppUpdateCheckResult(
       ok: true,
@@ -361,6 +455,30 @@ class UpdaterService {
       asset: matchedAsset,
       env: env,
     );
+  }
+
+  Future<Map<String, String>> _fetchChecksumsMap(
+    List<dynamic> rawAssets,
+    String userAgentVer,
+  ) async {
+    for (final entry in rawAssets) {
+      if (entry is! Map) continue;
+      final name = (entry['name'] ?? '').toString().trim().toLowerCase();
+      final url = (entry['browser_download_url'] ?? '').toString().trim();
+      if ((name == 'checksums.txt' || name == 'sha256sums.txt') &&
+          url.startsWith('https://')) {
+        try {
+          final resp = await _httpClient.get(
+            Uri.parse(url),
+            headers: {'User-Agent': 'Aula-Scrapt-Android/$userAgentVer'},
+          ).timeout(const Duration(seconds: 8));
+          if (resp.statusCode == 200) {
+            return parseChecksumsText(resp.body);
+          }
+        } catch (_) {}
+      }
+    }
+    return const {};
   }
 
   Future<File> downloadApk(
@@ -429,6 +547,21 @@ class UpdaterService {
       }
     } finally {
       await raf.close();
+    }
+
+    // Verificar SHA-256 contra checksums.txt si está disponible
+    if (asset.sha256 != null && asset.sha256!.isNotEmpty && Platform.isAndroid) {
+      final actualSha = await _channel.invokeMethod<String>(
+        'computeFileSha256',
+        {'path': outFile.path},
+      );
+      if (actualSha != null &&
+          actualSha.toLowerCase() != asset.sha256!.toLowerCase()) {
+        await outFile.delete().catchError((_) => outFile);
+        throw Exception(
+          'La verificación SHA-256 del APK falló (archivo corrupto o alterado).',
+        );
+      }
     }
 
     return outFile;

@@ -14,6 +14,7 @@
             <div class="brand">
                 <img src="/static/logo.svg" alt="Aula-Scrapt Logo" class="brand-logo" />
                 <h1>Aula-Scrapt</h1>
+                <span id="topbar-version-pill" class="version-pill">v{{ app_version }}</span>
                 <div id="session-badge" class="status-pill status-checking">
                     <span class="dot"></span>
                     <span id="session-text">Verificando...</span>
@@ -32,6 +33,9 @@
                 </button>
                 <button id="btn-logout" class="btn btn-danger btn-sm hidden" onclick="logoutSession()">
                     Salir
+                </button>
+                <button id="btn-notifications" class="btn btn-outline btn-sm btn-with-dot" onclick="openNotificationsModal()" title="Centro de notificaciones">
+                    Avisos <span id="notif-badge" class="notif-count-badge hidden">0</span>
                 </button>
                 <button class="btn btn-outline btn-sm" onclick="toggleModal('qr-modal')">
                     Movil (QR)
@@ -61,6 +65,9 @@
                 <button class="btn btn-outline btn-sm" onclick="pickNativeFolder()">
                     Elegir carpeta...
                 </button>
+                <button id="btn-rescan-local" class="btn btn-outline btn-sm" onclick="rescanLocalFolder()" title="Re-escanear archivos locales dentro de esta carpeta">
+                    Re-escanear carpeta
+                </button>
             </div>
 
             <div class="scan-controls">
@@ -69,17 +76,35 @@
                         <strong id="stat-courses">0</strong> ramos |
                         <strong id="stat-total">0</strong> archivos (<strong id="stat-new">0</strong> pendientes)
                     </span>
-                    <div class="filter-tabs">
+                    <div class="filter-tabs" role="tablist">
                         <button class="tab-btn active" data-filter="files" onclick="setFilter('files')">
                             Archivos
                         </button>
                         <button class="tab-btn" data-filter="new" onclick="setFilter('new')">
-                            No descargados
+                            Pendientes
                         </button>
                         <button class="tab-btn" data-filter="all" onclick="setFilter('all')">
                             Todo
                         </button>
+                        <button class="tab-btn" data-filter="deadlines" onclick="setFilter('deadlines')">
+                            Entregas <span id="deadlines-tab-badge" class="mini-pill hidden">0</span>
+                        </button>
                     </div>
+                    <input
+                        type="search"
+                        id="input-search"
+                        class="text-input search-input-inline"
+                        placeholder="Buscar archivo o ramo..."
+                        oninput="setSearchQuery(this.value)"
+                    />
+                    <div id="ext-filter-chips" class="ext-chips-group">
+                        <button type="button" class="chip-btn active" data-ext="" onclick="setExtensionFilter('')">Todas</button>
+                        <button type="button" class="chip-btn" data-ext="pdf" onclick="setExtensionFilter('pdf')">PDF</button>
+                        <button type="button" class="chip-btn" data-ext="pptx" onclick="setExtensionFilter('pptx')">PPTX</button>
+                        <button type="button" class="chip-btn" data-ext="docx" onclick="setExtensionFilter('docx')">DOCX</button>
+                        <button type="button" class="chip-btn" data-ext="zip" onclick="setExtensionFilter('zip')">ZIP</button>
+                    </div>
+                    <button type="button" id="btn-toggle-hidden-courses" class="btn btn-outline btn-xs" onclick="toggleShowHiddenCourses()">Ver ocultos</button>
                     <button class="btn btn-outline btn-xs" onclick="selectAllNew()">Marcar pendientes</button>
                     <button class="btn btn-outline btn-xs" onclick="clearSelection()">Limpiar</button>
                 </div>
@@ -132,19 +157,63 @@
         </footer>
     </div>
 
-    <!-- Modal QR -->
+    <!-- Modal QR y Emparejamiento Movil -->
     <div id="qr-modal" class="modal-backdrop hidden" onclick="closeModalOnBackdrop(event, 'qr-modal')">
-        <div class="modal-card">
+        <div class="modal-card modal-card-wide">
             <div class="modal-header">
-                <h3>Acceso en Telefono</h3>
+                <h3>Conectar Telefono</h3>
                 <button class="close-btn" onclick="toggleModal('qr-modal')">&times;</button>
             </div>
-            <div class="modal-body center">
-                <p class="muted">Escanea este codigo conectado a la misma red Wi-Fi:</p>
+            <div class="modal-tabs" role="tablist">
+                <button type="button" class="tab-btn active" data-qr-tab="web" onclick="switchQrTab('web')">Acceso Web LAN</button>
+                <button type="button" class="tab-btn" data-qr-tab="pair" onclick="switchQrTab('pair')">Vincular App Android</button>
+            </div>
+            <div id="qr-tab-web" class="modal-body center">
+                <p class="muted">Abre esta URL en el navegador de tu telefono (misma red Wi-Fi):</p>
                 <div class="qr-wrapper">
                     <img src="data:image/png;base64,{{ qr_b64 }}" alt="QR" />
                 </div>
                 <p class="url-text"><a href="{{ mobile_url }}" target="_blank">{{ mobile_url }}</a></p>
+            </div>
+            <div id="qr-tab-pair" class="modal-body center hidden">
+                <p class="muted">Transfiere tu sesion, carpetas y reglas de guardado directo a la APK Android:</p>
+                <div id="pair-loading" class="muted" style="padding:14px;">Generando codigo seguro...</div>
+                <div id="pair-content" class="hidden">
+                    <div class="qr-wrapper">
+                        <img id="pair-qr-img" src="" alt="QR Emparejamiento" />
+                    </div>
+                    <div class="pair-pin-box">
+                        <span class="muted">PIN de un solo uso:</span>
+                        <strong id="pair-pin-code" class="pair-pin-code">------</strong>
+                        <span id="pair-expiry" class="muted"></span>
+                    </div>
+                    <p class="muted" style="font-size:11.5px;">Servidor: <code id="pair-base-url">-</code></p>
+                </div>
+                <div id="pair-error" class="update-status err hidden"></div>
+                <div class="modal-footer" style="justify-content:center; margin-top:12px;">
+                    <button type="button" class="btn btn-outline btn-sm" onclick="createPairingSession()">Regenerar codigo</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Modal Notificaciones -->
+    <div id="notifications-modal" class="modal-backdrop hidden" onclick="closeModalOnBackdrop(event, 'notifications-modal')">
+        <div class="modal-card modal-card-wide">
+            <div class="modal-header">
+                <div class="settings-title-group">
+                    <h3>Notificaciones</h3>
+                    <span id="notif-modal-count" class="version-pill">0 sin leer</span>
+                </div>
+                <button class="close-btn" onclick="toggleModal('notifications-modal')">&times;</button>
+            </div>
+            <div class="notif-toolbar">
+                <button type="button" class="btn btn-outline btn-xs" onclick="markAllNotificationsRead()">Marcar todas como leidas</button>
+                <button type="button" class="btn btn-outline btn-xs" onclick="sendTestNotification()">Probar aviso</button>
+                <button type="button" class="btn btn-danger btn-xs" onclick="clearAllNotifications()">Limpiar</button>
+            </div>
+            <div id="notifications-list" class="notifications-list">
+                <div class="muted center" style="padding:20px;">No hay notificaciones recientes.</div>
             </div>
         </div>
     </div>
@@ -185,79 +254,291 @@
         </div>
     </div>
 
-    <!-- Modal Configuracion y Actualizaciones -->
+    <!-- Modal Configuracion y Personalizacion -->
     <div id="settings-modal" class="modal-backdrop hidden" onclick="closeModalOnBackdrop(event, 'settings-modal')">
-        <div class="modal-card modal-card-wide">
+        <div class="modal-card modal-card-wide modal-card-tall">
             <div class="modal-header">
                 <div class="settings-title-group">
-                    <h3>Configuracion y actualizaciones</h3>
-                    <span id="settings-version-pill" class="version-pill">v1.2.0</span>
+                    <h3>Personalizacion y configuracion</h3>
+                    <span id="settings-version-pill" class="version-pill">v{{ app_version }}</span>
                 </div>
                 <button class="close-btn" onclick="toggleModal('settings-modal')">&times;</button>
             </div>
-            <div class="modal-body settings-body">
-                <div class="settings-section">
-                    <div class="settings-section-title">Carpeta base de descargas</div>
-                    <div class="settings-path-row">
-                        <input type="text" id="settings-download-root" class="text-input" readonly placeholder="Sin carpeta configurada" />
-                        <button class="btn btn-outline btn-sm" onclick="chooseFolderFromSettings()">Elegir...</button>
+
+            <div class="modal-tabs" role="tablist">
+                <button type="button" class="tab-btn active" data-settings-tab="save" onclick="switchSettingsTab('save')">Guardado</button>
+                <button type="button" class="tab-btn" data-settings-tab="appearance" onclick="switchSettingsTab('appearance')">Apariencia</button>
+                <button type="button" class="tab-btn" data-settings-tab="filters" onclick="switchSettingsTab('filters')">Filtros</button>
+                <button type="button" class="tab-btn" data-settings-tab="notifications" onclick="switchSettingsTab('notifications')">Notificaciones</button>
+                <button type="button" class="tab-btn" data-settings-tab="updates" onclick="switchSettingsTab('updates')">Actualizaciones</button>
+            </div>
+
+            <div class="modal-body settings-body settings-scroll-body">
+                <!-- TAB: GUARDADO Y OBSIDIAN -->
+                <div id="settings-pane-save" class="settings-pane">
+                    <div class="settings-section">
+                        <div class="settings-section-title">Carpeta base de descargas</div>
+                        <div class="settings-path-row">
+                            <input type="text" id="settings-download-root" class="text-input" readonly placeholder="Sin carpeta configurada" />
+                            <button class="btn btn-outline btn-sm" onclick="chooseFolderFromSettings()">Elegir...</button>
+                        </div>
+                        <div style="margin-top:8px; display:flex; gap:8px; align-items:center; justify-content:space-between;">
+                            <span class="muted">Re-indexa archivos descargados manualmente dentro de esta carpeta.</span>
+                            <button type="button" class="btn btn-outline btn-xs" onclick="rescanLocalFolder()">Re-escanear ahora</button>
+                        </div>
+                    </div>
+
+                    <div class="settings-section">
+                        <div class="settings-section-title">Reglas de destino por defecto</div>
+                        <p class="muted">Subcarpeta predeterminada al configurar nuevos ramos (ej: Apuntes):</p>
+                        <input type="text" id="settings-default-subfolder" class="text-input" list="existing-folders-list" placeholder="Opcional (ej: Apuntes)" onchange="saveSettingField({ default_subfolder: this.value })" />
+
+                        <div class="settings-toggle-list">
+                            <div class="settings-row-between">
+                                <span>Organizar por seccion de Aula por defecto</span>
+                                <label class="switch">
+                                    <input type="checkbox" id="toggle-default-org-sec" onchange="saveSettingField({ default_organize_by_section: this.checked })" />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <div class="settings-row-between">
+                                <span>Omitir archivos ya presentes al seleccionar pendientes</span>
+                                <label class="switch">
+                                    <input type="checkbox" id="toggle-skip-downloaded" onchange="saveSettingField({ skip_already_downloaded: this.checked })" />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <div class="settings-row-between">
+                                <span>Omitir archivos ya vistos anteriormente</span>
+                                <label class="switch">
+                                    <input type="checkbox" id="toggle-skip-seen" onchange="saveSettingField({ skip_seen_on_select: this.checked })" />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <div class="settings-row-between">
+                                <span>Exportar enlaces y clases (URL) a indice Obsidian</span>
+                                <label class="switch">
+                                    <input type="checkbox" id="toggle-export-links" onchange="saveSettingField({ auto_export_links_to_obsidian: this.checked })" />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <div class="settings-row-between">
+                                <span>Exportar foros y anuncios a indice Obsidian</span>
+                                <label class="switch">
+                                    <input type="checkbox" id="toggle-export-forums" onchange="saveSettingField({ auto_export_forums_to_obsidian: this.checked })" />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
-                <div class="settings-section">
-                    <div class="settings-row-between">
-                        <div>
-                            <div class="settings-section-title">Buscar actualizaciones al iniciar</div>
-                            <p class="muted">Consulta GitHub Releases (<span id="settings-repo-name">OscarAcosta17/Aula-Scrapt</span>) automaticamente.</p>
-                        </div>
-                        <label class="switch">
-                            <input type="checkbox" id="toggle-auto-updates" checked onchange="toggleAutoCheckUpdates(this.checked)" />
-                            <span class="slider"></span>
-                        </label>
-                    </div>
-                </div>
-
-                <div class="settings-section">
-                    <div class="settings-row-between">
-                        <div>
-                            <div class="settings-section-title">Actualizaciones de la aplicacion</div>
-                            <p id="settings-env-desc" class="muted">Verificando entorno de instalacion...</p>
-                        </div>
-                        <button id="btn-check-updates" class="btn btn-outline btn-sm" onclick="checkForAppUpdates(false)">
-                            Buscar actualizaciones
-                        </button>
-                    </div>
-
-                    <div id="update-status-msg" class="update-status hidden"></div>
-
-                    <div id="update-available-box" class="update-card hidden">
-                        <div class="update-card-head">
+                <!-- TAB: APARIENCIA Y COMPORTAMIENTO -->
+                <div id="settings-pane-appearance" class="settings-pane hidden">
+                    <div class="settings-section">
+                        <div class="settings-row-between">
                             <div>
-                                <span id="update-new-version" class="update-tag">v0.0.0</span>
-                                <strong id="update-release-title">Nueva version disponible</strong>
+                                <div class="settings-section-title">Tema visual</div>
+                                <p class="muted">Elige oscuro, claro o segun tu sistema Windows.</p>
                             </div>
-                            <span id="update-asset-size" class="muted"></span>
+                            <select id="select-theme-mode" class="select-input" onchange="onThemePreferenceChange(this.value, null)">
+                                <option value="dark">Oscuro</option>
+                                <option value="light">Claro</option>
+                                <option value="system">Sistema</option>
+                            </select>
                         </div>
-                        <pre id="update-changelog" class="update-changelog"></pre>
-                        <p id="update-permission-note" class="update-perm-note hidden"></p>
+                    </div>
 
-                        <div id="update-progress-box" class="update-progress-box hidden">
-                            <div class="progress-bar-track">
-                                <div id="update-progress-bar" class="progress-bar-fill" style="width: 0%"></div>
+                    <div class="settings-section">
+                        <div class="settings-section-title">Color de acento</div>
+                        <div id="accent-picker" class="accent-picker-row">
+                            <button type="button" class="accent-swatch" data-accent="blue" onclick="onThemePreferenceChange(null, 'blue')" title="Azul"></button>
+                            <button type="button" class="accent-swatch" data-accent="emerald" onclick="onThemePreferenceChange(null, 'emerald')" title="Esmeralda"></button>
+                            <button type="button" class="accent-swatch" data-accent="violet" onclick="onThemePreferenceChange(null, 'violet')" title="Violeta"></button>
+                            <button type="button" class="accent-swatch" data-accent="amber" onclick="onThemePreferenceChange(null, 'amber')" title="Ambar"></button>
+                            <button type="button" class="accent-swatch" data-accent="rose" onclick="onThemePreferenceChange(null, 'rose')" title="Rosa"></button>
+                        </div>
+                    </div>
+
+                    <div class="settings-section">
+                        <div class="settings-toggle-list">
+                            <div class="settings-row-between">
+                                <span>Pestana inicial al abrir</span>
+                                <select id="select-default-tab" class="select-input" onchange="saveSettingField({ default_tab: this.value })">
+                                    <option value="new">Pendientes</option>
+                                    <option value="files">Archivos</option>
+                                    <option value="all">Todo</option>
+                                    <option value="deadlines">Entregas</option>
+                                </select>
                             </div>
-                            <div class="progress-meta">
-                                <span id="update-progress-msg">Preparando descarga...</span>
-                                <span id="update-progress-pct">0%</span>
+                            <div class="settings-row-between">
+                                <span>Ocultar secciones sin archivos</span>
+                                <label class="switch">
+                                    <input type="checkbox" id="toggle-hide-empty-sec" onchange="saveSettingField({ hide_empty_sections: this.checked })" />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <div class="settings-row-between">
+                                <div>
+                                    <span>Minimizar a la bandeja de Windows al cerrar ventana</span>
+                                    <p class="muted">Permite mantener alertas en segundo plano desde el icono del reloj.</p>
+                                </div>
+                                <label class="switch">
+                                    <input type="checkbox" id="toggle-minimize-tray" onchange="saveSettingField({ minimize_to_tray: this.checked })" />
+                                    <span class="slider"></span>
+                                </label>
                             </div>
                         </div>
+                    </div>
+                </div>
 
-                        <div class="modal-footer">
-                            <a id="link-release-github" class="btn btn-outline btn-sm" href="https://github.com/OscarAcosta17/Aula-Scrapt/releases" target="_blank" rel="noopener">
-                                Ver en GitHub
-                            </a>
-                            <button id="btn-apply-update" class="btn btn-primary btn-sm" onclick="applyAppUpdate()">
-                                Descargar y actualizar
+                <!-- TAB: FILTROS -->
+                <div id="settings-pane-filters" class="settings-pane hidden">
+                    <div class="settings-section">
+                        <div class="settings-section-title">Extensiones preferidas al marcar pendientes</div>
+                        <p class="muted">Si no seleccionas ninguna, se incluiran todos los tipos de archivo.</p>
+                        <div id="settings-ext-chips" class="ext-chips-group" style="margin-top:8px;">
+                            <button type="button" class="chip-btn" data-pref-ext="pdf" onclick="togglePreferredExtension('pdf')">PDF</button>
+                            <button type="button" class="chip-btn" data-pref-ext="pptx" onclick="togglePreferredExtension('pptx')">PPTX</button>
+                            <button type="button" class="chip-btn" data-pref-ext="docx" onclick="togglePreferredExtension('docx')">DOCX</button>
+                            <button type="button" class="chip-btn" data-pref-ext="xlsx" onclick="togglePreferredExtension('xlsx')">XLSX</button>
+                            <button type="button" class="chip-btn" data-pref-ext="zip" onclick="togglePreferredExtension('zip')">ZIP</button>
+                            <button type="button" class="chip-btn" data-pref-ext="txt" onclick="togglePreferredExtension('txt')">TXT</button>
+                        </div>
+                    </div>
+
+                    <div class="settings-section">
+                        <div class="settings-row-between">
+                            <div>
+                                <div class="settings-section-title">Limite maximo al auto-seleccionar (MB)</div>
+                                <p class="muted">0 = sin limite de tamano por archivo.</p>
+                            </div>
+                            <input type="number" id="input-max-auto-mb" class="text-input" style="width:90px; margin:0;" min="0" max="2048" value="0" onchange="saveSettingField({ max_auto_select_mb: parseInt(this.value || '0', 10) })" />
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TAB: NOTIFICACIONES -->
+                <div id="settings-pane-notifications" class="settings-pane hidden">
+                    <div class="settings-section">
+                        <div class="settings-toggle-list">
+                            <div class="settings-row-between">
+                                <span>Notificaciones nativas de Windows (Toast)</span>
+                                <label class="switch">
+                                    <input type="checkbox" id="toggle-notify-native" onchange="saveSettingField({ notify_native_enabled: this.checked })" />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <div class="settings-row-between">
+                                <span>Avisar nuevos archivos detectados en ramos</span>
+                                <label class="switch">
+                                    <input type="checkbox" id="toggle-notify-new" onchange="saveSettingField({ notify_on_new_files: this.checked })" />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <div class="settings-row-between">
+                                <span>Alertar tareas/evaluaciones proximas (&lt; 48h)</span>
+                                <label class="switch">
+                                    <input type="checkbox" id="toggle-notify-deadlines" onchange="saveSettingField({ notify_on_deadlines: this.checked })" />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <div class="settings-row-between">
+                                <span>Avisar cuando finalice una descarga</span>
+                                <label class="switch">
+                                    <input type="checkbox" id="toggle-notify-download" onchange="saveSettingField({ notify_on_download_done: this.checked })" />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <div class="settings-row-between">
+                                <div>
+                                    <span>Sincronizacion automatica en segundo plano</span>
+                                    <p class="muted">Revisa cambios de Aula periodicamente mientras la app este abierta.</p>
+                                </div>
+                                <select id="select-bg-sync-hours" class="select-input" onchange="saveSettingField({ background_sync_hours: parseInt(this.value || '0', 10) })">
+                                    <option value="0">Desactivada</option>
+                                    <option value="2">Cada 2 h</option>
+                                    <option value="6">Cada 6 h</option>
+                                    <option value="12">Cada 12 h</option>
+                                    <option value="24">Cada 24 h</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div style="margin-top:10px; display:flex; justify-content:flex-end;">
+                            <button type="button" class="btn btn-outline btn-xs" onclick="sendTestNotification()">Enviar aviso de prueba</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- TAB: ACTUALIZACIONES -->
+                <div id="settings-pane-updates" class="settings-pane hidden">
+                    <div class="settings-section">
+                        <div class="settings-toggle-list">
+                            <div class="settings-row-between">
+                                <div>
+                                    <div class="settings-section-title">Buscar actualizaciones al iniciar</div>
+                                    <p class="muted">Consulta GitHub Releases (<span id="settings-repo-name">OscarAcosta17/Aula-Scrapt</span>).</p>
+                                </div>
+                                <label class="switch">
+                                    <input type="checkbox" id="toggle-auto-updates" checked onchange="toggleAutoCheckUpdates(this.checked)" />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                            <div class="settings-row-between">
+                                <div>
+                                    <div class="settings-section-title">Canal Beta (pre-releases)</div>
+                                    <p class="muted">Recibe compilaciones anticipadas antes del lanzamiento estable.</p>
+                                </div>
+                                <label class="switch">
+                                    <input type="checkbox" id="toggle-beta-updates" onchange="saveSettingField({ beta_updates_channel: this.checked })" />
+                                    <span class="slider"></span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="settings-section">
+                        <div class="settings-row-between">
+                            <div>
+                                <div class="settings-section-title">Actualizaciones de la aplicacion</div>
+                                <p id="settings-env-desc" class="muted">Verificando entorno de instalacion...</p>
+                            </div>
+                            <button id="btn-check-updates" class="btn btn-outline btn-sm" onclick="checkForAppUpdates(false)">
+                                Buscar actualizaciones
                             </button>
+                        </div>
+
+                        <div id="update-status-msg" class="update-status hidden"></div>
+
+                        <div id="update-available-box" class="update-card hidden">
+                            <div class="update-card-head">
+                                <div>
+                                    <span id="update-new-version" class="update-tag">v0.0.0</span>
+                                    <strong id="update-release-title">Nueva version disponible</strong>
+                                </div>
+                                <span id="update-asset-size" class="muted"></span>
+                            </div>
+                            <pre id="update-changelog" class="update-changelog"></pre>
+                            <p id="update-permission-note" class="update-perm-note hidden"></p>
+
+                            <div id="update-progress-box" class="update-progress-box hidden">
+                                <div class="progress-bar-track">
+                                    <div id="update-progress-bar" class="progress-bar-fill" style="width: 0%"></div>
+                                </div>
+                                <div class="progress-meta">
+                                    <span id="update-progress-msg">Preparando descarga...</span>
+                                    <span id="update-progress-pct">0%</span>
+                                </div>
+                            </div>
+
+                            <div class="modal-footer">
+                                <a id="link-release-github" class="btn btn-outline btn-sm" href="https://github.com/OscarAcosta17/Aula-Scrapt/releases" target="_blank" rel="noopener">
+                                    Ver en GitHub
+                                </a>
+                                <button id="btn-apply-update" class="btn btn-primary btn-sm" onclick="applyAppUpdate()">
+                                    Descargar y actualizar
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>

@@ -1,5 +1,6 @@
 package cl.usm.aulascrapt.aula_scrapt
 
+import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageInfo
@@ -12,17 +13,25 @@ import android.os.Environment
 import android.provider.DocumentsContract
 import android.provider.Settings
 import android.view.WindowManager
+import android.webkit.MimeTypeMap
+import androidx.core.app.ActivityCompat
 import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
+import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import java.security.MessageDigest
 
 class MainActivity : FlutterActivity() {
     private val channelName = "cl.usm.aulascrapt/storage"
     private val pickDirRequestCode = 9412
+    private val notifPermRequestCode = 9413
     private var pendingDirResult: MethodChannel.Result? = null
+    private var pendingNotifPermResult: MethodChannel.Result? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -58,6 +67,34 @@ class MainActivity : FlutterActivity() {
                 "installApk" -> {
                     val apkPath = call.argument<String>("path")
                     launchApkInstaller(apkPath, result)
+                }
+                "computeFileSha256" -> {
+                    val filePath = call.argument<String>("path")
+                    result.success(computeSha256(filePath))
+                }
+                "openLocalFile" -> {
+                    val filePath = call.argument<String>("path")
+                    openLocalFile(filePath, result)
+                }
+                "hasNotificationPermission" -> {
+                    result.success(NotificationHelper.hasPermission(this))
+                }
+                "requestNotificationPermission" -> {
+                    requestPostNotificationPermission(result)
+                }
+                "showNativeNotification" -> {
+                    val title = call.argument<String>("title") ?: "Aula-Scrapt"
+                    val body = call.argument<String>("body") ?: ""
+                    val channelId = call.argument<String>("channelId") ?: NotificationHelper.CHANNEL_NEW_FILES
+                    result.success(NotificationHelper.showNotification(this, title, body, channelId))
+                }
+                "scheduleBackgroundSync" -> {
+                    val hours = call.argument<Int>("intervalHours") ?: 0
+                    BackgroundSyncWorker.schedule(applicationContext, hours)
+                    result.success(true)
+                }
+                "scanQrCode" -> {
+                    startQrCodeScanner(result)
                 }
                 "pickDirectory" -> {
                     if (pendingDirResult != null) {
@@ -105,7 +142,7 @@ class MainActivity : FlutterActivity() {
             pkgInfo.versionCode.toLong()
         }
         return mapOf(
-            "versionName" to (pkgInfo.versionName ?: "1.2.0"),
+            "versionName" to (pkgInfo.versionName ?: "1.3.0"),
             "versionCode" to versionCode,
             "packageName" to packageName,
             "abis" to Build.SUPPORTED_ABIS.toList(),
@@ -178,6 +215,110 @@ class MainActivity : FlutterActivity() {
         } catch (e: Exception) {
             result.error("INSTALL_ERROR", e.message ?: "Error al abrir el instalador", null)
         }
+    }
+
+    private fun computeSha256(filePath: String?): String? {
+        if (filePath.isNullOrBlank()) return null
+        val file = File(filePath)
+        if (!file.exists() || !file.isFile) return null
+        return try {
+            val digest = MessageDigest.getInstance("SHA-256")
+            file.inputStream().use { input ->
+                val buffer = ByteArray(65536)
+                var read: Int
+                while (input.read(buffer).also { read = it } != -1) {
+                    digest.update(buffer, 0, read)
+                }
+            }
+            digest.digest().joinToString("") { "%02x".format(it) }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun openLocalFile(filePath: String?, result: MethodChannel.Result) {
+        if (filePath.isNullOrBlank()) {
+            result.error("INVALID_PATH", "Ruta vacía", null)
+            return
+        }
+        val file = File(filePath)
+        if (!file.exists() || !file.isFile) {
+            result.error("NOT_FOUND", "El archivo ya no existe en disco", null)
+            return
+        }
+        try {
+            val uri = FileProvider.getUriForFile(this, "$packageName.fileprovider", file)
+            val ext = file.extension.lowercase()
+            val detectedMime = MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext) ?: "*/*"
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, detectedMime)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            startActivity(Intent.createChooser(intent, "Abrir ${file.name}"))
+            result.success(true)
+        } catch (e: Exception) {
+            result.error("OPEN_ERROR", e.message ?: "No hay app para abrir este archivo", null)
+        }
+    }
+
+    private fun requestPostNotificationPermission(result: MethodChannel.Result) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || NotificationHelper.hasPermission(this)) {
+            result.success(true)
+            return
+        }
+        if (pendingNotifPermResult != null) {
+            result.error("BUSY", "Solicitud de permiso pendiente", null)
+            return
+        }
+        pendingNotifPermResult = result
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+            notifPermRequestCode,
+        )
+    }
+
+    private fun startQrCodeScanner(result: MethodChannel.Result) {
+        try {
+            val options = GmsBarcodeScannerOptions.Builder()
+                .setBarcodeFormats(Barcode.FORMAT_QR_CODE)
+                .enableAutoZoom()
+                .build()
+            val scanner = GmsBarcodeScanning.getClient(this, options)
+            scanner.startScan()
+                .addOnSuccessListener { barcode ->
+                    val raw = barcode.rawValue
+                    if (raw.isNullOrBlank()) {
+                        result.error("EMPTY_QR", "El código QR no contiene texto", null)
+                    } else {
+                        result.success(raw)
+                    }
+                }
+                .addOnCanceledListener {
+                    result.error("CANCELLED", "Escaneo cancelado", null)
+                }
+                .addOnFailureListener { e ->
+                    result.error("SCANNER_UNAVAILABLE", e.message ?: "Escáner QR no disponible", null)
+                }
+        } catch (e: Exception) {
+            result.error("SCANNER_UNAVAILABLE", e.message ?: "Escáner QR no disponible", null)
+        }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        if (requestCode == notifPermRequestCode) {
+            val res = pendingNotifPermResult
+            pendingNotifPermResult = null
+            val granted = grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED
+            res?.success(granted)
+            return
+        }
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {

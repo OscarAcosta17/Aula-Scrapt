@@ -1,4 +1,4 @@
-import ctypes
+import hashlib
 import os
 import re
 import subprocess
@@ -12,9 +12,11 @@ from config import (
     APP_ROOT,
     APP_VERSION,
     DATA_DIR,
+    GITHUB_ALL_RELEASES_API_URL,
     GITHUB_LATEST_API_URL,
     GITHUB_RELEASES_URL,
     GITHUB_REPO,
+    load_settings,
 )
 
 
@@ -114,16 +116,73 @@ def select_windows_asset(assets: List[Dict], package_mode: str) -> Optional[Dict
     return parsed[0]
 
 
-def check_for_updates() -> Dict:
-    """Consulta la última release publicada en GitHub para OscarAcosta17/Aula-Scrapt."""
+def parse_checksums_text(raw_text: str) -> Dict[str, str]:
+    """Parsea líneas '<sha256>  <archivo>' de checksums.txt a un mapa en minúsculas."""
+    result: Dict[str, str] = {}
+    for line in (raw_text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        match = re.match(r"^([A-Fa-f0-9]{64})\s+[*]?(.+)$", stripped)
+        if not match:
+            continue
+        digest = match.group(1).lower()
+        filename = os.path.basename(match.group(2).strip()).lower()
+        if filename:
+            result[filename] = digest
+    return result
+
+
+def _fetch_release_checksums(assets: List[Dict], headers: Dict) -> Dict[str, str]:
+    for asset in assets or []:
+        name = str(asset.get("name", "")).strip()
+        url = str(asset.get("browser_download_url", "")).strip()
+        if name.lower() == "checksums.txt" and url.startswith("https://"):
+            try:
+                resp = requests.get(url, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    return parse_checksums_text(resp.text)
+            except requests.RequestException:
+                return {}
+    return {}
+
+
+def cleanup_old_staged_updates(updates_dir: Path, keep_name: str = "") -> None:
+    if not updates_dir.exists():
+        return
+    for item in updates_dir.iterdir():
+        if not item.is_file():
+            continue
+        if keep_name and item.name == keep_name:
+            continue
+        try:
+            item.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def check_for_updates(beta_channel: Optional[bool] = None) -> Dict:
+    """Consulta la última release (o prerelease si beta está activo) en GitHub."""
     env = get_update_environment_info()
+    include_beta = (
+        bool(load_settings().get("beta_updates_channel", False))
+        if beta_channel is None
+        else bool(beta_channel)
+    )
+    env["beta_updates_channel"] = include_beta
     headers = {
         "Accept": "application/vnd.github+json",
         "User-Agent": f"Aula-Scrapt-Updater/{APP_VERSION}",
     }
 
+    target_url = (
+        f"{GITHUB_ALL_RELEASES_API_URL}?per_page=10"
+        if include_beta
+        else GITHUB_LATEST_API_URL
+    )
+
     try:
-        res = requests.get(GITHUB_LATEST_API_URL, headers=headers, timeout=12)
+        res = requests.get(target_url, headers=headers, timeout=12)
     except requests.RequestException as exc:
         return {
             **env,
@@ -158,17 +217,44 @@ def check_for_updates() -> Dict:
             "error": f"Respuesta inesperada de GitHub (HTTP {res.status_code}).",
         }
 
-    data = res.json()
+    raw_payload = res.json()
+    if include_beta and isinstance(raw_payload, list):
+        candidates = [rel for rel in raw_payload if isinstance(rel, dict) and not rel.get("draft")]
+        if not candidates:
+            return {
+                **env,
+                "ok": True,
+                "no_releases": True,
+                "update_available": False,
+                "latest_version": APP_VERSION,
+                "message": "Aún no hay releases publicadas en el repositorio.",
+            }
+        data = candidates[0]
+    elif isinstance(raw_payload, dict):
+        data = raw_payload
+    else:
+        return {
+            **env,
+            "ok": False,
+            "update_available": False,
+            "error": "Formato inesperado de releases en GitHub.",
+        }
+
     tag = str(data.get("tag_name") or "").strip()
     latest_clean = tag.lstrip("vV") or APP_VERSION
     update_available = bool(tag) and is_newer_version(latest_clean, APP_VERSION)
-    asset = select_windows_asset(data.get("assets", []), env["package_mode"])
+    assets = data.get("assets", []) or []
+    asset = select_windows_asset(assets, env["package_mode"])
+    if asset:
+        checksums = _fetch_release_checksums(assets, headers)
+        asset["sha256"] = checksums.get(asset["name"].lower(), "")
 
     return {
         **env,
         "ok": True,
         "no_releases": False,
         "update_available": update_available,
+        "is_prerelease": bool(data.get("prerelease", False)),
         "latest_version": latest_clean,
         "tag_name": tag or f"v{latest_clean}",
         "release_name": data.get("name") or f"v{latest_clean}",
@@ -184,17 +270,20 @@ def download_update_asset(
     asset_name: str,
     expected_size: int = 0,
     on_progress: Optional[Callable[[int, int, int], None]] = None,
+    expected_sha256: str = "",
 ) -> Path:
-    """Descarga un binario .exe o .zip de actualización verificando integridad básica."""
+    """Descarga un binario .exe o .zip de actualización verificando firma mágica y SHA-256."""
     if not download_url.startswith("https://"):
         raise ValueError("La URL de actualización debe usar HTTPS.")
 
     updates_dir = DATA_DIR / "updates"
     updates_dir.mkdir(parents=True, exist_ok=True)
     safe_name = os.path.basename(asset_name) or "Aula-Scrapt-update.exe"
+    cleanup_old_staged_updates(updates_dir, keep_name="")
     target_path = updates_dir / safe_name
 
     headers = {"User-Agent": f"Aula-Scrapt-Updater/{APP_VERSION}"}
+    hasher = hashlib.sha256()
     with requests.get(download_url, headers=headers, stream=True, timeout=60) as resp:
         resp.raise_for_status()
         total = int(resp.headers.get("content-length") or expected_size or 0)
@@ -204,6 +293,7 @@ def download_update_asset(
                 if not chunk:
                     continue
                 fh.write(chunk)
+                hasher.update(chunk)
                 downloaded += len(chunk)
                 if on_progress:
                     pct = int((downloaded / total) * 100) if total > 0 else 0
@@ -222,6 +312,15 @@ def download_update_asset(
     if suffix == ".zip" and header_bytes != b"PK":
         target_path.unlink(missing_ok=True)
         raise RuntimeError("El paquete descargado no es un archivo .zip válido.")
+
+    clean_expected = (expected_sha256 or "").strip().lower()
+    if clean_expected:
+        actual_sha256 = hasher.hexdigest().lower()
+        if actual_sha256 != clean_expected:
+            target_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Verificación SHA-256 fallida para {safe_name}. Descarga abortada por seguridad."
+            )
 
     if on_progress:
         on_progress(file_size, file_size, 100)

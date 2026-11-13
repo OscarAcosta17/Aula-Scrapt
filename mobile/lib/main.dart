@@ -31,12 +31,12 @@ class AulaScraptApp extends StatelessWidget {
     required this.settingsService,
   });
 
-  static const Color _brandSeed = Color(0xFF38BDF8);
-
   ThemeData _buildExpressiveTheme(Brightness brightness) {
     final useDynamic =
         settingsService.useDynamicColor && settingsService.systemSeedColor != null;
-    final seed = useDynamic ? settingsService.systemSeedColor! : _brandSeed;
+    final seed = useDynamic
+        ? settingsService.systemSeedColor!
+        : settingsService.accentSeedColor;
 
     final scheme = ColorScheme.fromSeed(
       seedColor: seed,

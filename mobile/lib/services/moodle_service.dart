@@ -598,10 +598,167 @@ class MoodleService {
       obsidianFolder: folder,
       targetSubfolder: settingsService.getCourseSubfolder(id),
       organizeBySection: settingsService.getCourseOrganizeBySection(id),
+      isHidden: settingsService.isCourseHidden(id),
     );
   }
 
-  /// Escanea todas las secciones, pestañas, archivos, carpetas, tareas, foros y enlaces de un curso
+  /// Empareja la sesión y configuración desde el servidor PC local (`/api/pair/claim`)
+  Future<Map<String, dynamic>> loginFromPairingClaim(
+    Map<String, dynamic> claimPayload,
+  ) async {
+    final auth = claimPayload['auth'] is Map
+        ? Map<String, dynamic>.from(claimPayload['auth'] as Map)
+        : <String, dynamic>{};
+    final token = (auth['token'] ?? '').toString().trim();
+    final rawCookies = auth['cookies'];
+
+    Map<String, dynamic> authResult = {'success': false, 'message': 'Sin credenciales válidas en el PC.'};
+    if (token.isNotEmpty) {
+      authResult = await loginWithToken(token);
+    } else if (rawCookies is List && rawCookies.isNotEmpty) {
+      final cookiePairs = <String>[];
+      for (final c in rawCookies) {
+        if (c is Map) {
+          final cname = (c['name'] ?? '').toString().trim();
+          final cval = (c['value'] ?? '').toString().trim();
+          if (cname.isNotEmpty && cval.isNotEmpty) {
+            cookiePairs.add('$cname=$cval');
+          }
+        }
+      }
+      if (cookiePairs.isNotEmpty) {
+        authResult = await loginWithCookie(cookiePairs.join('; '));
+      }
+    } else if (rawCookies is String && rawCookies.trim().isNotEmpty) {
+      authResult = await loginWithCookie(rawCookies.trim());
+    }
+
+    if (authResult['success'] != true) {
+      return authResult;
+    }
+
+    await settingsService.applyPairedSettings(claimPayload);
+    await settingsService.addNotification(
+      title: 'Vinculado con PC',
+      body: 'Sesión, carpetas de ramos y reglas importadas desde el computador.',
+      kind: 'info',
+      dedupKey: 'paired_${DateTime.now().millisecondsSinceEpoch ~/ 60000}',
+    );
+    return authResult;
+  }
+
+  /// Normaliza títulos o nombres de archivo para emparejamiento local PC <-> Android
+  static String normalizeMatchKey(String input) {
+    final normalized = MoodleCourse.normalizeForMatch(input);
+    final noExt = normalized.replaceFirst(RegExp(r'\.[a-z0-9]{1,6}$'), '');
+    return noExt
+        .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
+  static String inferFileExt(String fileName, String title) {
+    for (final candidate in [fileName, title]) {
+      final clean = candidate.trim().toLowerCase();
+      final dot = clean.lastIndexOf('.');
+      if (dot > 0 && dot < clean.length - 1) {
+        final ext = clean.substring(dot + 1).trim();
+        if (ext.length <= 6 && RegExp(r'^[a-z0-9]+$').hasMatch(ext)) {
+          return ext;
+        }
+      }
+    }
+    return '';
+  }
+
+  static int? parseDueTimestamp(String rawText) {
+    final clean = rawText
+        .toLowerCase()
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (clean.isEmpty) return null;
+
+    const months = {
+      'enero': 1,
+      'ene': 1,
+      'febrero': 2,
+      'feb': 2,
+      'marzo': 3,
+      'mar': 3,
+      'abril': 4,
+      'abr': 4,
+      'mayo': 5,
+      'may': 5,
+      'junio': 6,
+      'jun': 6,
+      'julio': 7,
+      'jul': 7,
+      'agosto': 8,
+      'ago': 8,
+      'septiembre': 9,
+      'setiembre': 9,
+      'sep': 9,
+      'sept': 9,
+      'octubre': 10,
+      'oct': 10,
+      'noviembre': 11,
+      'nov': 11,
+      'diciembre': 12,
+      'dic': 12,
+      'january': 1,
+      'jan': 1,
+      'february': 2,
+      'march': 3,
+      'april': 4,
+      'may_en': 5,
+      'june': 6,
+      'july': 7,
+      'august': 8,
+      'september': 9,
+      'october': 10,
+      'november': 11,
+      'december': 12,
+    };
+
+    // Ej: "18 de noviembre de 2026, 23:59" o "18 noviembre 2026 23:59"
+    final mText = RegExp(
+      r'(\d{1,2})\s+(?:de\s+)?([a-záéíóú]+)(?:\s+(?:de\s+)?(\d{4}))?(?:[,\s]+(\d{1,2}):(\d{2}))?',
+    ).firstMatch(clean);
+    if (mText != null) {
+      final day = int.tryParse(mText.group(1) ?? '');
+      final monName = MoodleCourse.normalizeForMatch(mText.group(2) ?? '');
+      final month = months[monName];
+      if (day != null && month != null && day >= 1 && day <= 31) {
+        final year = int.tryParse(mText.group(3) ?? '') ?? DateTime.now().year;
+        final hour = int.tryParse(mText.group(4) ?? '') ?? 23;
+        final min = int.tryParse(mText.group(5) ?? '') ?? 59;
+        try {
+          return DateTime(year, month, day, hour, min).millisecondsSinceEpoch ~/ 1000;
+        } catch (_) {}
+      }
+    }
+
+    // Ej: "18/11/2026 23:59" o "18-11-2026"
+    final mNum = RegExp(
+      r'(\d{1,2})[/-](\d{1,2})[/-](\d{4})(?:[,\s]+(\d{1,2}):(\d{2}))?',
+    ).firstMatch(clean);
+    if (mNum != null) {
+      final day = int.tryParse(mNum.group(1) ?? '');
+      final month = int.tryParse(mNum.group(2) ?? '');
+      final year = int.tryParse(mNum.group(3) ?? '');
+      if (day != null && month != null && year != null) {
+        final hour = int.tryParse(mNum.group(4) ?? '') ?? 23;
+        final min = int.tryParse(mNum.group(5) ?? '') ?? 59;
+        try {
+          return DateTime(year, month, day, hour, min).millisecondsSinceEpoch ~/ 1000;
+        } catch (_) {}
+      }
+    }
+
+    return null;
+  }
+
+  /// Escanea todas las secciones, pestañas, archivos, carpetas, tareas, cuestionarios, foros y enlaces de un curso
   Future<List<MoodleItem>> scanCourseContents(MoodleCourse course) async {
     if (!isAuthenticated) throw SessionExpiredException('No autenticado');
 
@@ -609,8 +766,173 @@ class MoodleService {
         ? await _scanContentsWithToken(course.id)
         : await _scanContentsWithCookie(course.id);
 
+    if (isTokenAuth) {
+      await _attachWebServiceDeadlines(course.id, items);
+    }
+
     await enrichItemsWithLocalStatus(items, course.obsidianFolder);
     return items;
+  }
+
+  /// Consulta WebServices de tareas y cuestionarios para completar timestamps de cierre
+  Future<void> _attachWebServiceDeadlines(
+    int courseId,
+    List<MoodleItem> items,
+  ) async {
+    if (_token == null || _token!.isEmpty) return;
+    final hasTargets = items.any((i) => i.type == 'assignment' || i.type == 'quiz');
+    if (!hasTargets) return;
+
+    final assignDeadlinesByCmid = <int, int>{};
+    final assignDeadlinesByName = <String, int>{};
+    try {
+      final resp = await _client.post(
+        Uri.parse(wsUrl),
+        headers: {'User-Agent': userAgent},
+        body: {
+          'wstoken': _token!,
+          'wsfunction': 'mod_assign_get_assignments',
+          'moodlewsrestformat': 'json',
+          'courseids[0]': courseId.toString(),
+        },
+      ).timeout(const Duration(seconds: 10));
+      if (resp.statusCode == 200) {
+        final decoded = json.decode(resp.body);
+        if (decoded is Map && decoded['courses'] is List) {
+          for (final c in decoded['courses'] as List) {
+            if (c is Map && c['assignments'] is List) {
+              for (final a in c['assignments'] as List) {
+                if (a is! Map) continue;
+                final due = (a['duedate'] as num?)?.toInt() ?? 0;
+                if (due <= 0) continue;
+                final cmid = (a['cmid'] as num?)?.toInt() ?? 0;
+                final name = normalizeMatchKey((a['name'] ?? '').toString());
+                if (cmid > 0) assignDeadlinesByCmid[cmid] = due;
+                if (name.isNotEmpty) assignDeadlinesByName[name] = due;
+              }
+            }
+          }
+        }
+      }
+    } catch (_) {}
+
+    final quizDeadlinesByCmid = <int, int>{};
+    final quizDeadlinesByName = <String, int>{};
+    try {
+      final resp = await _client.post(
+        Uri.parse(wsUrl),
+        headers: {'User-Agent': userAgent},
+        body: {
+          'wstoken': _token!,
+          'wsfunction': 'mod_quiz_get_quizzes_by_courses',
+          'moodlewsrestformat': 'json',
+          'courseids[0]': courseId.toString(),
+        },
+      ).timeout(const Duration(seconds: 10));
+      if (resp.statusCode == 200) {
+        final decoded = json.decode(resp.body);
+        if (decoded is Map && decoded['quizzes'] is List) {
+          for (final q in decoded['quizzes'] as List) {
+            if (q is! Map) continue;
+            final closeTs = (q['timeclose'] as num?)?.toInt() ?? 0;
+            if (closeTs <= 0) continue;
+            final cmid = (q['coursemodule'] as num?)?.toInt() ?? 0;
+            final name = normalizeMatchKey((q['name'] ?? '').toString());
+            if (cmid > 0) quizDeadlinesByCmid[cmid] = closeTs;
+            if (name.isNotEmpty) quizDeadlinesByName[name] = closeTs;
+          }
+        }
+      }
+    } catch (_) {}
+
+    for (final item in items) {
+      if ((item.dueTimestamp ?? 0) > 0) continue;
+      final mId = RegExp(r'id=(\d+)').firstMatch(item.url);
+      final cmid = int.tryParse(mId?.group(1) ?? '') ?? 0;
+      final normTitle = normalizeMatchKey(item.title);
+      int? foundTs;
+      if (item.type == 'assignment') {
+        foundTs = assignDeadlinesByCmid[cmid] ?? assignDeadlinesByName[normTitle];
+      } else if (item.type == 'quiz') {
+        foundTs = quizDeadlinesByCmid[cmid] ?? quizDeadlinesByName[normTitle];
+      }
+      if (foundTs != null && foundTs > 0) {
+        item.dueTimestamp = foundTs;
+        if (item.dueText.isEmpty) {
+          final dt = DateTime.fromMillisecondsSinceEpoch(foundTs * 1000).toLocal();
+          item.dueText =
+              '${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')}/${dt.year} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+        }
+      }
+    }
+  }
+
+  /// Sincroniza IDs conocidos para BackgroundSyncWorker y genera alertas en app/OS
+  Future<void> processScanNotifications(
+    List<MoodleCourse> courses, {
+    Set<String>? previousKnownIds,
+  }) async {
+    final allIds = <String>{};
+    for (final course in courses) {
+      for (final item in course.items) {
+        allIds.add(item.id);
+      }
+    }
+    await settingsService.saveKnownItemIds(allIds);
+
+    if (courses.isEmpty) return;
+
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    for (final course in courses) {
+      if (course.isHidden) continue;
+
+      if (previousKnownIds != null &&
+          previousKnownIds.isNotEmpty &&
+          settingsService.notifyOnNewFiles) {
+        final newItems = course.items
+            .where(
+              (i) =>
+                  i.downloadable &&
+                  !i.isDownloaded &&
+                  !previousKnownIds.contains(i.id),
+            )
+            .toList();
+        if (newItems.isNotEmpty) {
+          final first = newItems.first;
+          final title = newItems.length == 1
+              ? 'Nuevo archivo en ${course.cleanName}'
+              : '${newItems.length} archivos nuevos en ${course.cleanName}';
+          final body = newItems.length == 1
+              ? first.title
+              : 'Incluye: ${first.title}';
+          await settingsService.addNotification(
+            title: title,
+            body: body,
+            kind: 'new_file',
+            courseName: course.cleanName,
+            dedupKey: 'new:${course.id}:${first.id}:${newItems.length}',
+            triggerNative: true,
+            nativeChannelId: 'aula_new_files',
+          );
+        }
+      }
+
+      if (settingsService.notifyOnDeadlines) {
+        for (final item in course.items) {
+          if (!item.isUrgentDeadline) continue;
+          final diffHours = ((item.dueTimestamp! - nowSec) / 3600).ceil().clamp(1, 48);
+          await settingsService.addNotification(
+            title: 'Entrega en ${diffHours}h',
+            body: '${course.cleanName}: ${item.title}',
+            kind: 'deadline',
+            courseName: course.cleanName,
+            dedupKey: 'due:${item.id}:${item.dueTimestamp}',
+            triggerNative: true,
+            nativeChannelId: 'aula_deadlines',
+          );
+        }
+      }
+    }
   }
 
   Future<List<MoodleItem>> _scanContentsWithToken(int courseId) async {
@@ -647,6 +969,26 @@ class MoodleService {
           final modUrl = (mod['url'] ?? '').toString().trim();
           final contents = mod['contents'] as List? ?? [];
 
+          final modDates = mod['dates'] as List? ?? [];
+          int? modDueTs;
+          String modDueText = '';
+          for (final d in modDates) {
+            if (d is! Map) continue;
+            final label = (d['label'] ?? '').toString().toLowerCase();
+            final ts = (d['timestamp'] as num?)?.toInt() ?? 0;
+            if (ts > 0 &&
+                (label.contains('venc') ||
+                    label.contains('cierra') ||
+                    label.contains('close') ||
+                    label.contains('due') ||
+                    modDueTs == null)) {
+              modDueTs = ts;
+              final dt = DateTime.fromMillisecondsSinceEpoch(ts * 1000).toLocal();
+              modDueText =
+                  '${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')}/${dt.year} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+            }
+          }
+
           if (modType == 'folder' && contents.isNotEmpty) {
             for (final c in contents) {
               final fileUrl = (c['fileurl'] ?? '').toString();
@@ -661,6 +1003,7 @@ class MoodleService {
                 type: 'file',
                 url: fileUrl,
                 fileName: fileName,
+                fileExt: inferFileExt(fileName, modName),
                 downloadable: true,
                 sizeBytes: fileSize,
               ));
@@ -691,6 +1034,21 @@ class MoodleService {
               url: modUrl,
               fileName: modName,
               downloadable: false,
+              dueTimestamp: modDueTs,
+              dueText: modDueText,
+            ));
+          } else if (modType == 'quiz') {
+            items.add(MoodleItem(
+              id: 'quiz_$modId',
+              courseId: courseId,
+              title: modName.isNotEmpty ? modName : 'Cuestionario',
+              section: secName,
+              type: 'quiz',
+              url: modUrl,
+              fileName: modName,
+              downloadable: false,
+              dueTimestamp: modDueTs,
+              dueText: modDueText,
             ));
           } else if (modType == 'forum') {
             items.add(MoodleItem(
@@ -719,6 +1077,7 @@ class MoodleService {
                 type: 'file',
                 url: fileUrl,
                 fileName: fileName,
+                fileExt: inferFileExt(fileName, title),
                 downloadable: true,
                 sizeBytes: fileSize,
               ));
@@ -901,6 +1260,44 @@ class MoodleService {
           final modIdMatch = RegExp(r'[?&]id=(\d+)').firstMatch(href);
           final cmId = modIdMatch?.group(1);
 
+          String actDueText = '';
+          int? actDueTs;
+          if (href.contains('/mod/assign/') || href.contains('/mod/quiz/')) {
+            final dateContainer = act.querySelector(
+              '[data-region="activity-dates"], .activity-dates, .description, .activity-altcontent',
+            );
+            final rawDateBlock = (dateContainer?.text ?? '').replaceAll(RegExp(r'\s+'), ' ').trim();
+            if (rawDateBlock.isNotEmpty) {
+              for (final clause in rawDateBlock.split(RegExp(r'[\r\n|•]+'))) {
+                final cLower = clause.toLowerCase();
+                if (cLower.contains('venc') ||
+                    cLower.contains('cierra') ||
+                    cLower.contains('cierre') ||
+                    cLower.contains('entrega') ||
+                    cLower.contains('due') ||
+                    cLower.contains('close')) {
+                  final parsed = parseDueTimestamp(clause);
+                  if (parsed != null) {
+                    actDueTs = parsed;
+                    final dt = DateTime.fromMillisecondsSinceEpoch(parsed * 1000).toLocal();
+                    actDueText =
+                        '${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')}/${dt.year} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+                    break;
+                  }
+                }
+              }
+              if (actDueTs == null) {
+                final parsed = parseDueTimestamp(rawDateBlock);
+                if (parsed != null) {
+                  actDueTs = parsed;
+                  final dt = DateTime.fromMillisecondsSinceEpoch(parsed * 1000).toLocal();
+                  actDueText =
+                      '${dt.day.toString().padLeft(2, '0')}/${dt.month.toString().padLeft(2, '0')}/${dt.year} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+                }
+              }
+            }
+          }
+
           if (href.contains('/mod/resource/') || href.contains('pluginfile.php')) {
             final itemId = cmId != null ? 'res_$cmId' : 'file_${href.hashCode.abs()}';
             items.add(MoodleItem(
@@ -911,6 +1308,7 @@ class MoodleService {
               type: 'file',
               url: href,
               fileName: title,
+              fileExt: inferFileExt(title, href),
               downloadable: true,
             ));
           } else if (href.contains('/mod/folder/')) {
@@ -926,6 +1324,22 @@ class MoodleService {
               url: href,
               fileName: title,
               downloadable: false,
+              dueTimestamp: actDueTs,
+              dueText: actDueText,
+            ));
+          } else if (href.contains('/mod/quiz/')) {
+            final itemId = cmId != null ? 'quiz_$cmId' : 'quiz_${href.hashCode.abs()}';
+            items.add(MoodleItem(
+              id: itemId,
+              courseId: courseId,
+              title: title,
+              section: sectionName,
+              type: 'quiz',
+              url: href,
+              fileName: title,
+              downloadable: false,
+              dueTimestamp: actDueTs,
+              dueText: actDueText,
             ));
           } else if (href.contains('/mod/url/')) {
             final itemId = cmId != null ? 'url_$cmId' : 'url_${href.hashCode.abs()}';
@@ -1030,6 +1444,7 @@ class MoodleService {
   }
 
   /// Enriquece ítems con estado 'En carpeta' / 'Pendiente' y tamaño conocido desde historial o disco
+  /// Enriquece ítems con estado local inteligente (historial, .aula-scrapt-index.json y disco)
   Future<void> enrichItemsWithLocalStatus(
     List<MoodleItem> items,
     String obsidianFolderName,
@@ -1038,36 +1453,85 @@ class MoodleService {
     final downloadedIds = history['downloaded_ids'] as Map<String, dynamic>;
     final seenIds = history['seen_ids'] as Map<String, dynamic>;
     final fileSizes = history['file_sizes'] as Map<String, dynamic>;
+    final sharedIndex = await settingsService.loadSharedIndex();
+    final sharedItems = sharedIndex['items'] as Map<String, dynamic>? ?? {};
+    final rootDir = Directory(settingsService.downloadRoot);
 
-    // Recolectar archivos ya presentes en disco dentro de la carpeta del curso
-    final Set<String> existingNames = {};
+    // Recolectar archivos ya presentes en disco estrictamente dentro de downloadRoot/<curso>
+    final List<({String path, String normKey})> diskFiles = [];
     try {
       final courseDir = Directory(
-        p.join(settingsService.downloadRoot, MoodleCourse.sanitizeFileName(obsidianFolderName)),
+        p.join(
+          settingsService.downloadRoot,
+          MoodleCourse.sanitizeFileName(obsidianFolderName),
+        ),
       );
       if (await courseDir.exists()) {
         await for (final entity in courseDir.list(recursive: true, followLinks: false)) {
           if (entity is File) {
             final base = p.basename(entity.path);
-            if (base.startsWith('00 - Indice') || base.startsWith('00 - Seccion')) continue;
-            existingNames.add(base.toLowerCase());
-            existingNames.add(p.basenameWithoutExtension(base).toLowerCase());
+            if (base.startsWith('.') ||
+                base.startsWith('00 - Indice') ||
+                base.startsWith('00 - Seccion')) {
+              continue;
+            }
+            diskFiles.add((
+              path: entity.path,
+              normKey: normalizeMatchKey(base),
+            ));
           }
         }
       }
     } catch (_) {}
 
-    for (final item in items) {
-      final titleClean = MoodleCourse.sanitizeFileName(item.title).toLowerCase();
-      final titleStem = p.basenameWithoutExtension(titleClean).toLowerCase();
+    String? findDiskMatch(MoodleItem item) {
+      final rawFileKey = normalizeMatchKey(item.fileName);
+      final titleKey = normalizeMatchKey(item.title);
+      final targetKeys = {
+        if (rawFileKey.isNotEmpty) rawFileKey,
+        if (titleKey.isNotEmpty) titleKey,
+      };
+      if (targetKeys.isEmpty) return null;
 
+      for (final lf in diskFiles) {
+        if (lf.normKey.isNotEmpty && targetKeys.contains(lf.normKey)) {
+          return lf.path;
+        }
+      }
+      for (final lf in diskFiles) {
+        if (lf.normKey.isEmpty) continue;
+        for (final target in targetKeys) {
+          if (target.length >= 6 &&
+              lf.normKey.length >= 6 &&
+              (lf.normKey.contains(target) || target.contains(lf.normKey))) {
+            return lf.path;
+          }
+          final targetTokens =
+              target.split(' ').where((t) => t.length >= 3).toSet();
+          final diskTokens =
+              lf.normKey.split(' ').where((t) => t.length >= 3).toSet();
+          if (targetTokens.length >= 2 && diskTokens.isNotEmpty) {
+            final common = targetTokens.intersection(diskTokens).length;
+            if (common >= targetTokens.length ||
+                (common >= 3 && common / targetTokens.length >= 0.8)) {
+              return lf.path;
+            }
+          }
+        }
+      }
+      return null;
+    }
+
+    for (final item in items) {
       bool isDownloaded = false;
       String? localPath;
       int sz = item.sizeBytes;
 
       if (downloadedIds.containsKey(item.id)) {
-        final info = downloadedIds[item.id] as Map<String, dynamic>;
-        final savedPath = (info['path'] ?? '').toString();
+        final rawInfo = downloadedIds[item.id];
+        final savedPath = rawInfo is Map
+            ? (rawInfo['path'] ?? '').toString()
+            : rawInfo?.toString() ?? '';
         if (savedPath.isNotEmpty) {
           final f = File(savedPath);
           if (await f.exists()) {
@@ -1079,9 +1543,36 @@ class MoodleService {
             } catch (_) {}
           }
         }
-      } else if (existingNames.contains(titleClean) ||
-          (titleStem.isNotEmpty && existingNames.contains(titleStem))) {
-        isDownloaded = true;
+      }
+
+      // Revisar índice compartido PC <-> Android (.aula-scrapt-index.json) dentro de downloadRoot
+      if (!isDownloaded && sharedItems[item.id] is Map && await rootDir.exists()) {
+        final rel = (sharedItems[item.id]['relative_path'] ?? '').toString();
+        if (rel.isNotEmpty && !rel.contains('..')) {
+          final candidate = File(p.normalize(p.join(rootDir.path, rel)));
+          if (p.isWithin(p.normalize(rootDir.absolute.path), p.normalize(candidate.absolute.path)) &&
+              await candidate.exists()) {
+            isDownloaded = true;
+            localPath = candidate.path;
+            try {
+              sz = await candidate.length();
+              fileSizes[item.id] = sz;
+            } catch (_) {}
+          }
+        }
+      }
+
+      // Escaneo inteligente por nombre/título dentro de la carpeta del ramo
+      if (!isDownloaded && item.downloadable) {
+        final diskHit = findDiskMatch(item);
+        if (diskHit != null) {
+          isDownloaded = true;
+          localPath = diskHit;
+          try {
+            sz = await File(diskHit).length();
+            fileSizes[item.id] = sz;
+          } catch (_) {}
+        }
       }
 
       if (sz <= 0 && fileSizes.containsKey(item.id)) {

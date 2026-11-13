@@ -5,6 +5,7 @@ import '../services/settings_service.dart';
 import '../services/updater_service.dart';
 import 'auth_sheets.dart';
 import 'courses_screen.dart';
+import 'pairing_sheet.dart';
 import 'update_sheet.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -355,6 +356,24 @@ class _LoginScreenState extends State<LoginScreen> {
             ),
           ),
         ),
+        const SizedBox(height: 12),
+        OutlinedButton.icon(
+          onPressed: _isLoading
+              ? null
+              : () async {
+                  final ok = await showPairingSheet(
+                    context,
+                    moodleService: widget.moodleService,
+                    settingsService: widget.settingsService,
+                  );
+                  if (ok && mounted) _goToCourses();
+                },
+          icon: const Icon(Icons.qr_code_scanner_rounded, size: 19),
+          label: const Text('Sincronizar desde PC (QR / PIN)'),
+          style: OutlinedButton.styleFrom(
+            minimumSize: const Size.fromHeight(48),
+          ),
+        ),
       ],
     );
   }
@@ -427,6 +446,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   onPressed: () => showAppUpdateSheet(
                     context,
                     updaterService: UpdaterService(),
+                    includePrereleases: widget.settingsService.betaUpdatesChannel,
                   ),
                   icon: const Icon(Icons.system_update_rounded),
                 ),

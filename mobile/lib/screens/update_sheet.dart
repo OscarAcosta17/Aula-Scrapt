@@ -7,6 +7,7 @@ Future<void> showAppUpdateSheet(
   BuildContext context, {
   required UpdaterService updaterService,
   AppUpdateCheckResult? initialResult,
+  bool includePrereleases = false,
   void Function(AppUpdateCheckResult result)? onCheckCompleted,
 }) async {
   await showModalBottomSheet<void>(
@@ -16,6 +17,7 @@ Future<void> showAppUpdateSheet(
     builder: (_) => _AppUpdateSheet(
       updaterService: updaterService,
       initialResult: initialResult,
+      includePrereleases: includePrereleases,
       onCheckCompleted: onCheckCompleted,
     ),
   );
@@ -24,11 +26,13 @@ Future<void> showAppUpdateSheet(
 class _AppUpdateSheet extends StatefulWidget {
   final UpdaterService updaterService;
   final AppUpdateCheckResult? initialResult;
+  final bool includePrereleases;
   final void Function(AppUpdateCheckResult result)? onCheckCompleted;
 
   const _AppUpdateSheet({
     required this.updaterService,
     this.initialResult,
+    this.includePrereleases = false,
     this.onCheckCompleted,
   });
 
@@ -89,7 +93,9 @@ class _AppUpdateSheetState extends State<_AppUpdateSheet>
       _actionError = null;
     });
 
-    final res = await widget.updaterService.checkForUpdates();
+    final res = await widget.updaterService.checkForUpdates(
+      includePrereleases: widget.includePrereleases,
+    );
     if (!mounted) return;
     setState(() {
       _checking = false;
@@ -448,7 +454,7 @@ class _AppUpdateSheetState extends State<_AppUpdateSheet>
                       const SizedBox(width: 6),
                       Expanded(
                         child: Text(
-                          '${asset.name} · ${asset.sizeLabel} (${asset.archTag})',
+                          '${asset.name} · ${asset.sizeLabel} (${asset.archTag})${asset.sha256 != null ? ' · SHA-256' : ''}',
                           style: tt.labelMedium?.copyWith(color: cs.onSurfaceVariant),
                         ),
                       ),

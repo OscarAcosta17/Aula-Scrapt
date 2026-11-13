@@ -9,9 +9,11 @@ import '../services/updater_service.dart';
 import 'auth_sheets.dart';
 import 'folder_picker_dialog.dart';
 import 'login_screen.dart';
+import 'notifications_sheet.dart';
+import 'pairing_sheet.dart';
 import 'update_sheet.dart';
 
-enum ResourceFilter { files, pending, all }
+enum ResourceFilter { files, pending, deadlines, all }
 
 class CoursesScreen extends StatefulWidget {
   final MoodleService moodleService;
@@ -39,6 +41,10 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
   List<MoodleCourse> _courses = [];
   List<String> _existingSubfolders = [];
   ResourceFilter _filter = ResourceFilter.files;
+  final Set<String> _extFilter = {};
+  bool _showHiddenCourses = false;
+  bool _isFromCache = false;
+  int? _cachedAtSec;
   String _searchQuery = '';
 
   final Set<int> _expandedCourses = {};
@@ -57,6 +63,18 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
   String _downloadingFile = '';
   String _downloadingStage = '';
 
+  List<MoodleCourse> get _displayCourses {
+    if (_showHiddenCourses) return _courses;
+    return _courses.where((c) => !c.isHidden).toList();
+  }
+
+  int get _hiddenCoursesCount => _courses.where((c) => c.isHidden).length;
+
+  int get _urgentDeadlinesCount => _displayCourses.fold(
+        0,
+        (acc, c) => acc + c.urgentDeadlinesCount,
+      );
+
   @override
   void initState() {
     super.initState();
@@ -66,6 +84,12 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
       settingsService: widget.settingsService,
     );
     _updaterService = widget.updaterService ?? UpdaterService();
+    _filter = switch (widget.settingsService.defaultFilterKey) {
+      'pending' => ResourceFilter.pending,
+      'deadlines' => ResourceFilter.deadlines,
+      'all' => ResourceFilter.all,
+      _ => ResourceFilter.files,
+    };
     _initScreen();
   }
 
@@ -80,6 +104,7 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       _refreshPermissionAndSubfolders();
+      widget.settingsService.reloadNotifications();
       widget.settingsService.refreshSystemSeedColor().then((_) {
         if (widget.settingsService.useDynamicColor) {
           widget.settingsService.themeNotifier.value++;
@@ -90,6 +115,37 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
 
   Future<void> _initScreen() async {
     await _refreshPermissionAndSubfolders();
+    unawaited(
+      widget.settingsService.scheduleBackgroundSync(
+        widget.settingsService.backgroundSyncHours,
+      ),
+    );
+
+    // Arranque instantáneo desde caché offline mientras se sincroniza en vivo
+    final cached = await widget.settingsService.loadScanCache();
+    if (cached != null && mounted) {
+      final cachedCourses = cached['courses'] as List<MoodleCourse>? ?? [];
+      if (cachedCourses.isNotEmpty) {
+        for (final c in cachedCourses) {
+          c.isHidden = widget.settingsService.isCourseHidden(c.id);
+          await widget.moodleService.enrichItemsWithLocalStatus(
+            c.items,
+            c.obsidianFolder,
+          );
+        }
+        if (mounted) {
+          setState(() {
+            _courses = cachedCourses;
+            _isFromCache = true;
+            _cachedAtSec = cached['cachedAt'] as int?;
+            _activeWideCourseId ??= _displayCourses.isNotEmpty
+                ? _displayCourses.first.id
+                : (_courses.isNotEmpty ? _courses.first.id : null);
+          });
+        }
+      }
+    }
+
     await widget.moodleService.verifySessionLive();
     if (mounted && !widget.moodleService.isAuthenticated) {
       _goToLogin();
@@ -101,8 +157,27 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
     }
   }
 
+  Future<void> _rescanLocalFiles() async {
+    if (_courses.isEmpty) return;
+    _setStatus('Re-escaneando carpetas locales...');
+    for (final c in _courses) {
+      await widget.moodleService.enrichItemsWithLocalStatus(
+        c.items,
+        c.obsidianFolder,
+      );
+    }
+    await widget.settingsService.saveHistory();
+    await widget.settingsService.saveScanCache(_courses);
+    if (mounted) {
+      setState(() {});
+      _setStatus('Carpetas locales re-escaneadas');
+    }
+  }
+
   Future<void> _checkUpdatesSilently() async {
-    final res = await _updaterService.checkForUpdates();
+    final res = await _updaterService.checkForUpdates(
+      includePrereleases: widget.settingsService.betaUpdatesChannel,
+    );
     if (!mounted) return;
     setState(() {
       _latestUpdateResult = res;
@@ -115,6 +190,7 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
       context,
       updaterService: _updaterService,
       initialResult: _latestUpdateResult,
+      includePrereleases: widget.settingsService.betaUpdatesChannel,
       onCheckCompleted: (res) {
         if (!mounted) return;
         setState(() {
@@ -158,6 +234,11 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
 
   Future<void> _scanAula() async {
     if (_isScanning) return;
+    final previousKnownIds = <String>{
+      for (final c in _courses)
+        for (final it in c.items) it.id,
+    };
+
     setState(() {
       _isScanning = true;
       _statusMessage = null;
@@ -170,16 +251,19 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
 
       for (final c in courses) {
         c.isLoadingContents = true;
+        c.isHidden = widget.settingsService.isCourseHidden(c.id);
       }
 
       if (!mounted) return;
       setState(() {
         _existingSubfolders = subs;
         _courses = courses;
-        if (courses.isNotEmpty &&
+        _isFromCache = false;
+        final visible = _displayCourses;
+        if (visible.isNotEmpty &&
             (_activeWideCourseId == null ||
-                !courses.any((c) => c.id == _activeWideCourseId))) {
-          _activeWideCourseId = courses.first.id;
+                !visible.any((c) => c.id == _activeWideCourseId))) {
+          _activeWideCourseId = visible.first.id;
         }
       });
 
@@ -202,6 +286,13 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
         }));
       }
 
+      await widget.settingsService.saveHistory();
+      await widget.settingsService.saveScanCache(courses);
+      await widget.moodleService.processScanNotifications(
+        courses,
+        previousKnownIds: previousKnownIds.isEmpty ? null : previousKnownIds,
+      );
+
       if (mounted) {
         _setStatus(null);
       }
@@ -219,7 +310,10 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
       );
     } finally {
       if (mounted) {
-        setState(() => _isScanning = false);
+        setState(() {
+          _isScanning = false;
+          _isFromCache = false;
+        });
       }
     }
   }
@@ -319,12 +413,21 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
       _selectedQueue.fold(0, (acc, e) => acc + e.item.sizeBytes);
 
   void _selectAllPending() {
+    final maxBytes = widget.settingsService.maxAutoSelectMb * 1024 * 1024;
+    final skipDl = widget.settingsService.skipAlreadyDownloaded;
+    final skipSeen = widget.settingsService.skipSeenOnSelect;
+
     setState(() {
-      for (final c in _courses) {
+      for (final c in _displayCourses) {
         for (final i in c.items) {
-          if (i.downloadable && !i.isDownloaded) {
-            i.isSelected = true;
+          if (!i.downloadable) continue;
+          if (skipDl && i.isDownloaded) continue;
+          if (skipSeen && !i.isNew) continue;
+          if (maxBytes > 0 && i.sizeBytes > maxBytes) continue;
+          if (_extFilter.isNotEmpty && !_extFilter.contains(i.effectiveExt)) {
+            continue;
           }
+          i.isSelected = true;
         }
       }
     });
@@ -454,35 +557,53 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
   }
 
   List<MoodleItem> _filteredItems(MoodleCourse course) {
-    final q = _searchQuery.trim().toLowerCase();
+    final q = MoodleCourse.normalizeForMatch(_searchQuery.trim());
     final courseNameMatches = q.isEmpty ||
-        course.cleanName.toLowerCase().contains(q) ||
-        course.obsidianFolder.toLowerCase().contains(q);
+        MoodleCourse.normalizeForMatch(course.cleanName).contains(q) ||
+        MoodleCourse.normalizeForMatch(course.obsidianFolder).contains(q);
 
-    return course.items.where((item) {
+    final list = course.items.where((item) {
       final passesFilter = switch (_filter) {
         ResourceFilter.files => item.downloadable,
         ResourceFilter.pending => item.downloadable && !item.isDownloaded,
+        ResourceFilter.deadlines =>
+          item.type == 'assignment' || item.type == 'quiz',
         ResourceFilter.all => true,
       };
       if (!passesFilter) return false;
+      if (_extFilter.isNotEmpty &&
+          item.downloadable &&
+          !_extFilter.contains(item.effectiveExt)) {
+        return false;
+      }
       if (q.isEmpty || courseNameMatches) return true;
-      return item.title.toLowerCase().contains(q) ||
-          item.section.toLowerCase().contains(q) ||
-          item.fileName.toLowerCase().contains(q);
+      return MoodleCourse.normalizeForMatch(item.title).contains(q) ||
+          MoodleCourse.normalizeForMatch(item.section).contains(q) ||
+          MoodleCourse.normalizeForMatch(item.fileName).contains(q);
     }).toList();
+
+    if (_filter == ResourceFilter.deadlines) {
+      list.sort((a, b) {
+        final ta = a.dueTimestamp ?? 9999999999;
+        final tb = b.dueTimestamp ?? 9999999999;
+        return ta.compareTo(tb);
+      });
+    }
+    return list;
   }
 
   List<MoodleCourse> get _visibleCourses {
-    final q = _searchQuery.trim().toLowerCase();
-    if (q.isEmpty) return _courses;
-    return _courses.where((c) {
-      if (c.cleanName.toLowerCase().contains(q) ||
-          c.obsidianFolder.toLowerCase().contains(q)) {
+    final base = _displayCourses;
+    final q = MoodleCourse.normalizeForMatch(_searchQuery.trim());
+    if (q.isEmpty) return base;
+    return base.where((c) {
+      if (MoodleCourse.normalizeForMatch(c.cleanName).contains(q) ||
+          MoodleCourse.normalizeForMatch(c.obsidianFolder).contains(q)) {
         return true;
       }
       return c.items.any((i) =>
-          i.title.toLowerCase().contains(q) || i.section.toLowerCase().contains(q));
+          MoodleCourse.normalizeForMatch(i.title).contains(q) ||
+          MoodleCourse.normalizeForMatch(i.section).contains(q));
     }).toList();
   }
 
@@ -490,6 +611,7 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
     final folderCtrl = TextEditingController(text: course.obsidianFolder);
     final subCtrl = TextEditingController(text: course.targetSubfolder);
     bool orgBySection = course.organizeBySection;
+    bool hideCourse = course.isHidden;
 
     await showModalBottomSheet<void>(
       context: context,
@@ -587,6 +709,30 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
                     value: orgBySection,
                     onChanged: (v) => setSheetState(() => orgBySection = v),
                   ),
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('Ocultar ramo de la vista principal'),
+                    subtitle: const Text('Podrás recuperarlo con el filtro "Ocultos"'),
+                    value: hideCourse,
+                    onChanged: (v) => setSheetState(() => hideCourse = v),
+                  ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: () async {
+                      final messenger = ScaffoldMessenger.of(context);
+                      await _downloaderService.syncCourseObsidianIndex(course);
+                      if (!ctx.mounted) return;
+                      messenger.showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            'Índice Obsidian actualizado en ${course.obsidianFolder}',
+                          ),
+                        ),
+                      );
+                    },
+                    icon: const Icon(Icons.auto_stories_outlined, size: 18),
+                    label: const Text('Exportar enlaces y foros a Obsidian (.md)'),
+                  ),
                   const SizedBox(height: 16),
                   Row(
                     children: [
@@ -612,6 +758,9 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
                             course.organizeBySection = orgBySection;
                             await widget.settingsService
                                 .setCourseOrganizeBySection(course.id, orgBySection);
+                            course.isHidden = hideCourse;
+                            await widget.settingsService
+                                .setCourseHidden(course.id, hideCourse);
 
                             await widget.moodleService.enrichItemsWithLocalStatus(
                               course.items,
@@ -639,161 +788,511 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
   }
 
   Future<void> _openAccountSettingsSheet() async {
+    final defSubCtrl = TextEditingController(
+      text: widget.settingsService.defaultSubfolder,
+    );
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
       builder: (ctx) => ListenableBuilder(
         listenable: widget.settingsService.themeNotifier,
-        builder: (ctx, _) {
-          final cs = Theme.of(ctx).colorScheme;
-          final tt = Theme.of(ctx).textTheme;
-          final authLabel = widget.moodleService.isTokenAuth
-              ? 'Conectado por Token (wstoken)'
-              : 'Conectado por Sesión WebView / Cookie';
+        builder: (ctx, _) => StatefulBuilder(
+          builder: (sheetCtx, setSheetState) {
+            final cs = Theme.of(ctx).colorScheme;
+            final tt = Theme.of(ctx).textTheme;
+            final authLabel = widget.moodleService.isTokenAuth
+                ? 'Conectado por Token (wstoken)'
+                : 'Conectado por Sesión WebView / Cookie';
 
-          return Padding(
-            padding: const EdgeInsets.fromLTRB(20, 4, 20, 24),
-            child: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  // Cabecera usuario
-                  Card(
-                    color: cs.surfaceContainerHigh,
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Row(
+            return Padding(
+              padding: EdgeInsets.fromLTRB(
+                20,
+                4,
+                20,
+                24 + MediaQuery.of(ctx).viewInsets.bottom,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // Cabecera usuario
+                    Card(
+                      color: cs.surfaceContainerHigh,
+                      child: Padding(
+                        padding: const EdgeInsets.all(16),
+                        child: Row(
+                          children: [
+                            CircleAvatar(
+                              radius: 22,
+                              backgroundColor: cs.primaryContainer,
+                              child: Icon(
+                                Icons.person_rounded,
+                                color: cs.onPrimaryContainer,
+                              ),
+                            ),
+                            const SizedBox(width: 14),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    widget.moodleService.userName ?? 'Usuario Aula USM',
+                                    style: tt.titleSmall?.copyWith(
+                                      fontWeight: FontWeight.w600,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    authLabel,
+                                    style: tt.bodySmall?.copyWith(
+                                      color: cs.onSurfaceVariant,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Container(
+                              width: 10,
+                              height: 10,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: widget.moodleService.isAuthenticated
+                                    ? Colors.greenAccent.shade400
+                                    : cs.error,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+
+                    Text(
+                      'Sesión y PC',
+                      style: tt.labelLarge?.copyWith(color: cs.primary),
+                    ),
+                    const SizedBox(height: 8),
+                    Card(
+                      color: cs.surfaceContainerHigh,
+                      clipBehavior: Clip.antiAlias,
+                      child: Column(
                         children: [
-                          CircleAvatar(
-                            radius: 22,
-                            backgroundColor: cs.primaryContainer,
-                            child: Icon(Icons.person_rounded, color: cs.onPrimaryContainer),
+                          ListTile(
+                            leading: const Icon(Icons.qr_code_scanner_rounded),
+                            title: const Text('Sincronizar desde PC (QR / PIN)'),
+                            subtitle: const Text(
+                              'Importar sesión y carpetas por Wi-Fi local',
+                            ),
+                            trailing: const Icon(Icons.chevron_right_rounded),
+                            onTap: () async {
+                              Navigator.of(ctx).pop();
+                              final paired = await showPairingSheet(
+                                context,
+                                moodleService: widget.moodleService,
+                                settingsService: widget.settingsService,
+                              );
+                              if (paired && mounted) {
+                                await _scanAula();
+                              }
+                            },
                           ),
-                          const SizedBox(width: 14),
-                          Expanded(
+                          const Divider(height: 1, indent: 56),
+                          ListTile(
+                            leading: const Icon(Icons.public_rounded),
+                            title: const Text('Cambiar sesión (Navegador)'),
+                            subtitle: const Text('Iniciar sesión con Microsoft 365'),
+                            onTap: () {
+                              Navigator.of(ctx).pop();
+                              _handleBrowserSwitch();
+                            },
+                          ),
+                          const Divider(height: 1, indent: 56),
+                          ListTile(
+                            leading: const Icon(Icons.key_rounded),
+                            title: const Text('Conectar con Token (wstoken)'),
+                            subtitle: const Text('Alternativa rápida sin navegador'),
+                            onTap: () {
+                              Navigator.of(ctx).pop();
+                              _handleTokenModal();
+                            },
+                          ),
+                          const Divider(height: 1, indent: 56),
+                          ListTile(
+                            leading: const Icon(Icons.cookie_outlined),
+                            title: const Text('Ingresar Cookie MoodleSession'),
+                            subtitle: const Text(
+                              'Usar sesión activa copiada del navegador',
+                            ),
+                            onTap: () {
+                              Navigator.of(ctx).pop();
+                              _handleCookieModal();
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+
+                    Text(
+                      'Guardado y Obsidian',
+                      style: tt.labelLarge?.copyWith(color: cs.primary),
+                    ),
+                    const SizedBox(height: 8),
+                    Card(
+                      color: cs.surfaceContainerHigh,
+                      clipBehavior: Clip.antiAlias,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 8),
+                        child: Column(
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 16,
+                                vertical: 6,
+                              ),
+                              child: TextField(
+                                controller: defSubCtrl,
+                                decoration: InputDecoration(
+                                  labelText: 'Subcarpeta por defecto',
+                                  hintText: 'Aula (vacío = raíz del ramo)',
+                                  suffixIcon: IconButton(
+                                    tooltip: 'Aplicar',
+                                    icon: const Icon(Icons.check_rounded),
+                                    onPressed: () async {
+                                      final messenger = ScaffoldMessenger.of(context);
+                                      await widget.settingsService
+                                          .setDefaultSubfolder(defSubCtrl.text);
+                                      if (!ctx.mounted) return;
+                                      setSheetState(() {});
+                                      messenger.showSnackBar(
+                                        const SnackBar(
+                                          content: Text('Subcarpeta por defecto guardada'),
+                                        ),
+                                      );
+                                    },
+                                  ),
+                                ),
+                                onSubmitted: (v) => widget.settingsService
+                                    .setDefaultSubfolder(v),
+                              ),
+                            ),
+                            SwitchListTile.adaptive(
+                              title: const Text('Organizar por secciones'),
+                              subtitle: const Text(
+                                'Regla inicial al descubrir ramos nuevos',
+                              ),
+                              value: widget.settingsService.defaultOrganizeBySection,
+                              onChanged: (v) async {
+                                await widget.settingsService
+                                    .setDefaultOrganizeBySection(v);
+                                setSheetState(() {});
+                              },
+                            ),
+                            SwitchListTile.adaptive(
+                              title: const Text('Saltar ya descargados'),
+                              subtitle: const Text(
+                                'Evita marcar archivos existentes en carpeta',
+                              ),
+                              value: widget.settingsService.skipAlreadyDownloaded,
+                              onChanged: (v) async {
+                                await widget.settingsService
+                                    .setSkipAlreadyDownloaded(v);
+                                setSheetState(() {});
+                              },
+                            ),
+                            SwitchListTile.adaptive(
+                              title: const Text('Saltar vistos al seleccionar'),
+                              subtitle: const Text(
+                                'Marcar pendientes solo elige ítems no vistos',
+                              ),
+                              value: widget.settingsService.skipSeenOnSelect,
+                              onChanged: (v) async {
+                                await widget.settingsService
+                                    .setSkipSeenOnSelect(v);
+                                setSheetState(() {});
+                              },
+                            ),
+                            SwitchListTile.adaptive(
+                              title: const Text('Exportar enlaces URL a Obsidian'),
+                              subtitle: const Text(
+                                'Agrega ## Enlaces y Clases al índice .md',
+                              ),
+                              value: widget.settingsService.autoExportLinksToObsidian,
+                              onChanged: (v) async {
+                                await widget.settingsService
+                                    .setAutoExportLinksToObsidian(v);
+                                setSheetState(() {});
+                              },
+                            ),
+                            SwitchListTile.adaptive(
+                              title: const Text('Exportar foros a Obsidian'),
+                              subtitle: const Text(
+                                'Agrega ## Foros y Anuncios al índice .md',
+                              ),
+                              value: widget.settingsService.autoExportForumsToObsidian,
+                              onChanged: (v) async {
+                                await widget.settingsService
+                                    .setAutoExportForumsToObsidian(v);
+                                setSheetState(() {});
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+
+                    Text(
+                      'Filtros y Selección',
+                      style: tt.labelLarge?.copyWith(color: cs.primary),
+                    ),
+                    const SizedBox(height: 8),
+                    Card(
+                      color: cs.surfaceContainerHigh,
+                      child: Padding(
+                        padding: const EdgeInsets.all(14),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'Vista inicial predeterminada',
+                              style: tt.labelMedium?.copyWith(
+                                color: cs.onSurfaceVariant,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 6,
+                              children: [
+                                for (final opt in const [
+                                  ('files', 'Archivos'),
+                                  ('pending', 'Pendientes'),
+                                  ('deadlines', 'Entregas'),
+                                  ('all', 'Todo'),
+                                ])
+                                  ChoiceChip(
+                                    label: Text(opt.$2),
+                                    selected:
+                                        widget.settingsService.defaultFilterKey ==
+                                            opt.$1,
+                                    onSelected: (_) async {
+                                      await widget.settingsService
+                                          .setDefaultFilterKey(opt.$1);
+                                      setSheetState(() {});
+                                    },
+                                  ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            Text(
+                              'Tamaño máximo auto-selección',
+                              style: tt.labelMedium?.copyWith(
+                                color: cs.onSurfaceVariant,
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            Wrap(
+                              spacing: 8,
+                              runSpacing: 6,
+                              children: [
+                                for (final mb in const [0, 10, 25, 50, 100])
+                                  ChoiceChip(
+                                    label: Text(mb == 0 ? 'Sin límite' : '$mb MB'),
+                                    selected:
+                                        widget.settingsService.maxAutoSelectMb == mb,
+                                    onSelected: (_) async {
+                                      await widget.settingsService
+                                          .setMaxAutoSelectMb(mb);
+                                      setSheetState(() {});
+                                    },
+                                  ),
+                              ],
+                            ),
+                            const SizedBox(height: 8),
+                            SwitchListTile.adaptive(
+                              contentPadding: EdgeInsets.zero,
+                              title: const Text('Ocultar secciones vacías'),
+                              value: widget.settingsService.hideEmptySections,
+                              onChanged: (v) async {
+                                await widget.settingsService
+                                    .setHideEmptySections(v);
+                                setSheetState(() {});
+                                if (mounted) setState(() {});
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+
+                    Text(
+                      'Notificaciones y Segundo Plano',
+                      style: tt.labelLarge?.copyWith(color: cs.primary),
+                    ),
+                    const SizedBox(height: 8),
+                    Card(
+                      color: cs.surfaceContainerHigh,
+                      clipBehavior: Clip.antiAlias,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          SwitchListTile.adaptive(
+                            title: const Text('Notificaciones nativas del sistema'),
+                            subtitle: const Text(
+                              'Muestra avisos en la barra de estado de Android',
+                            ),
+                            value: widget.settingsService.notifyNativeEnabled,
+                            onChanged: (v) async {
+                              if (v) {
+                                final granted = await widget.settingsService
+                                    .hasNotificationPermission();
+                                if (!granted) {
+                                  await widget.settingsService
+                                      .requestNotificationPermission();
+                                }
+                              }
+                              await widget.settingsService
+                                  .setNotifyNativeEnabled(v);
+                              setSheetState(() {});
+                            },
+                          ),
+                          const Divider(height: 1, indent: 16),
+                          SwitchListTile.adaptive(
+                            title: const Text('Archivos nuevos en Aula'),
+                            value: widget.settingsService.notifyOnNewFiles,
+                            onChanged: (v) async {
+                              await widget.settingsService.setNotifyOnNewFiles(v);
+                              setSheetState(() {});
+                            },
+                          ),
+                          SwitchListTile.adaptive(
+                            title: const Text('Entregas próximas (< 48h)'),
+                            value: widget.settingsService.notifyOnDeadlines,
+                            onChanged: (v) async {
+                              await widget.settingsService.setNotifyOnDeadlines(v);
+                              setSheetState(() {});
+                            },
+                          ),
+                          SwitchListTile.adaptive(
+                            title: const Text('Descarga completada'),
+                            value: widget.settingsService.notifyOnDownloadDone,
+                            onChanged: (v) async {
+                              await widget.settingsService
+                                  .setNotifyOnDownloadDone(v);
+                              setSheetState(() {});
+                            },
+                          ),
+                          Padding(
+                            padding: const EdgeInsets.fromLTRB(16, 4, 16, 14),
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: [
                                 Text(
-                                  widget.moodleService.userName ?? 'Usuario Aula USM',
-                                  style: tt.titleSmall?.copyWith(fontWeight: FontWeight.w600),
+                                  'Revisión periódica en 2do plano (WorkManager)',
+                                  style: tt.labelMedium?.copyWith(
+                                    color: cs.onSurfaceVariant,
+                                  ),
                                 ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  authLabel,
-                                  style: tt.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+                                const SizedBox(height: 8),
+                                Wrap(
+                                  spacing: 8,
+                                  runSpacing: 6,
+                                  children: [
+                                    for (final h in const [0, 2, 6, 12, 24])
+                                      ChoiceChip(
+                                        label: Text(h == 0 ? 'Desact.' : 'Cada ${h}h'),
+                                        selected:
+                                            widget.settingsService.backgroundSyncHours ==
+                                                h,
+                                        onSelected: (_) async {
+                                          await widget.settingsService
+                                              .setBackgroundSyncHours(h);
+                                          setSheetState(() {});
+                                        },
+                                      ),
+                                  ],
                                 ),
                               ],
-                            ),
-                          ),
-                          Container(
-                            width: 10,
-                            height: 10,
-                            decoration: BoxDecoration(
-                              shape: BoxShape.circle,
-                              color: widget.moodleService.isAuthenticated
-                                  ? Colors.greenAccent.shade400
-                                  : cs.error,
                             ),
                           ),
                         ],
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 18),
+                    const SizedBox(height: 18),
 
-                  Text(
-                    'Sesión de Aula USM',
-                    style: tt.labelLarge?.copyWith(color: cs.primary),
-                  ),
-                  const SizedBox(height: 8),
-                  Card(
-                    color: cs.surfaceContainerHigh,
-                    clipBehavior: Clip.antiAlias,
-                    child: Column(
-                      children: [
-                        ListTile(
-                          leading: const Icon(Icons.public_rounded),
-                          title: const Text('Cambiar sesión (Navegador)'),
-                          subtitle: const Text('Iniciar sesión con Microsoft 365'),
-                          onTap: () {
-                            Navigator.of(ctx).pop();
-                            _handleBrowserSwitch();
-                          },
+                    Text(
+                      'Apariencia Android',
+                      style: tt.labelLarge?.copyWith(color: cs.primary),
+                    ),
+                    const SizedBox(height: 8),
+                    SegmentedButton<ThemeMode>(
+                      showSelectedIcon: false,
+                      selected: {widget.settingsService.themeMode},
+                      onSelectionChanged: (sel) =>
+                          widget.settingsService.setThemeMode(sel.first),
+                      segments: const [
+                        ButtonSegment(
+                          value: ThemeMode.system,
+                          icon: Icon(Icons.brightness_auto_rounded, size: 17),
+                          label: Text('Sistema'),
                         ),
-                        const Divider(height: 1, indent: 56),
-                        ListTile(
-                          leading: const Icon(Icons.key_rounded),
-                          title: const Text('Conectar con Token (wstoken)'),
-                          subtitle: const Text('Alternativa rápida sin navegador'),
-                          onTap: () {
-                            Navigator.of(ctx).pop();
-                            _handleTokenModal();
-                          },
+                        ButtonSegment(
+                          value: ThemeMode.dark,
+                          icon: Icon(Icons.dark_mode_rounded, size: 17),
+                          label: Text('Oscuro'),
                         ),
-                        const Divider(height: 1, indent: 56),
-                        ListTile(
-                          leading: const Icon(Icons.cookie_outlined),
-                          title: const Text('Ingresar Cookie MoodleSession'),
-                          subtitle: const Text('Usar sesión activa copiada del navegador'),
-                          onTap: () {
-                            Navigator.of(ctx).pop();
-                            _handleCookieModal();
-                          },
+                        ButtonSegment(
+                          value: ThemeMode.light,
+                          icon: Icon(Icons.light_mode_rounded, size: 17),
+                          label: Text('Claro'),
                         ),
                       ],
                     ),
-                  ),
-                  const SizedBox(height: 18),
-
-                  Text(
-                    'Apariencia Android',
-                    style: tt.labelLarge?.copyWith(color: cs.primary),
-                  ),
-                  const SizedBox(height: 8),
-                  SegmentedButton<ThemeMode>(
-                    showSelectedIcon: false,
-                    selected: {widget.settingsService.themeMode},
-                    onSelectionChanged: (sel) =>
-                        widget.settingsService.setThemeMode(sel.first),
-                    segments: const [
-                      ButtonSegment(
-                        value: ThemeMode.system,
-                        icon: Icon(Icons.brightness_auto_rounded, size: 17),
-                        label: Text('Sistema'),
+                    const SizedBox(height: 8),
+                    SwitchListTile.adaptive(
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 6),
+                      secondary: const Icon(Icons.palette_outlined),
+                      title: const Text('Color dinámico (Material You)'),
+                      subtitle: const Text(
+                        'Adapta la paleta a tu fondo de pantalla',
                       ),
-                      ButtonSegment(
-                        value: ThemeMode.dark,
-                        icon: Icon(Icons.dark_mode_rounded, size: 17),
-                        label: Text('Oscuro'),
-                      ),
-                      ButtonSegment(
-                        value: ThemeMode.light,
-                        icon: Icon(Icons.light_mode_rounded, size: 17),
-                        label: Text('Claro'),
+                      value: widget.settingsService.useDynamicColor,
+                      onChanged: (v) =>
+                          widget.settingsService.setUseDynamicColor(v),
+                    ),
+                    if (!widget.settingsService.useDynamicColor) ...[
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 10,
+                        runSpacing: 8,
+                        children: SettingsService.accentPalette.entries.map((entry) {
+                          final selected =
+                              widget.settingsService.accentSeedKey == entry.key;
+                          return ChoiceChip(
+                            label: Text(entry.key.toUpperCase()),
+                            avatar: CircleAvatar(
+                              backgroundColor: entry.value,
+                              radius: 8,
+                            ),
+                            selected: selected,
+                            onSelected: (_) =>
+                                widget.settingsService.setAccentSeedKey(entry.key),
+                          );
+                        }).toList(),
                       ),
                     ],
-                  ),
-                  const SizedBox(height: 8),
-                  SwitchListTile.adaptive(
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 6),
-                    secondary: const Icon(Icons.palette_outlined),
-                    title: const Text('Color dinámico (Material You)'),
-                    subtitle: const Text('Adapta la paleta a tu fondo de pantalla'),
-                    value: widget.settingsService.useDynamicColor,
-                    onChanged: (v) => widget.settingsService.setUseDynamicColor(v),
-                  ),
-                  const SizedBox(height: 18),
+                    const SizedBox(height: 18),
 
-                  Text(
-                    'Actualizaciones',
-                    style: tt.labelLarge?.copyWith(color: cs.primary),
-                  ),
-                  const SizedBox(height: 8),
-                  StatefulBuilder(
-                    builder: (sheetCtx, setUpdatesState) => Card(
+                    Text(
+                      'Actualizaciones',
+                      style: tt.labelLarge?.copyWith(color: cs.primary),
+                    ),
+                    const SizedBox(height: 8),
+                    Card(
                       color: cs.surfaceContainerHigh,
                       clipBehavior: Clip.antiAlias,
                       child: Column(
@@ -815,7 +1314,7 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
                             subtitle: Text(
                               _updateAvailable
                                   ? 'Toca para descargar e instalar el APK'
-                                  : 'Versión v${_latestUpdateResult?.currentVersion ?? '1.2.0'} · GitHub Releases',
+                                  : 'Versión v${_latestUpdateResult?.currentVersion ?? '1.3.0'} · GitHub Releases',
                             ),
                             trailing: _updateAvailable
                                 ? Chip(
@@ -845,37 +1344,53 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
                             ),
                             value: widget.settingsService.autoCheckUpdates,
                             onChanged: (v) async {
+                              await widget.settingsService.setAutoCheckUpdates(v);
+                              setSheetState(() {});
+                            },
+                          ),
+                          const Divider(height: 1, indent: 56),
+                          SwitchListTile.adaptive(
+                            contentPadding:
+                                const EdgeInsets.symmetric(horizontal: 16),
+                            secondary: const Icon(Icons.science_outlined),
+                            title: const Text('Canal Beta (pre-lanzamientos)'),
+                            subtitle: const Text(
+                              'Incluir versiones de prueba además de estables',
+                            ),
+                            value: widget.settingsService.betaUpdatesChannel,
+                            onChanged: (v) async {
                               await widget.settingsService
-                                  .setAutoCheckUpdates(v);
-                              setUpdatesState(() {});
+                                  .setBetaUpdatesChannel(v);
+                              setSheetState(() {});
                             },
                           ),
                         ],
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 16),
+                    const SizedBox(height: 16),
 
-                  FilledButton.tonalIcon(
-                    onPressed: () {
-                      Navigator.of(ctx).pop();
-                      _handleLogout();
-                    },
-                    icon: const Icon(Icons.logout_rounded),
-                    label: const Text('Cerrar sesión'),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: cs.errorContainer,
-                      foregroundColor: cs.onErrorContainer,
-                      minimumSize: const Size.fromHeight(48),
+                    FilledButton.tonalIcon(
+                      onPressed: () {
+                        Navigator.of(ctx).pop();
+                        _handleLogout();
+                      },
+                      icon: const Icon(Icons.logout_rounded),
+                      label: const Text('Cerrar sesión'),
+                      style: FilledButton.styleFrom(
+                        backgroundColor: cs.errorContainer,
+                        foregroundColor: cs.onErrorContainer,
+                        minimumSize: const Size.fromHeight(48),
+                      ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          );
-        },
+            );
+          },
+        ),
       ),
     );
+    defSubCtrl.dispose();
   }
 
   ({Color bg, Color fg}) _courseBadgeColors(ColorScheme cs, int index) {
@@ -910,6 +1425,27 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
                   child: _buildFloatingBottomDock(context, queue),
                 ),
             ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildNotificationsActionButton() {
+    return ValueListenableBuilder<int>(
+      valueListenable: widget.settingsService.notificationsNotifier,
+      builder: (context, _, _) {
+        final unread = widget.settingsService.unreadNotificationsCount;
+        return IconButton(
+          tooltip: 'Centro de notificaciones',
+          onPressed: () => showNotificationsSheet(
+            context,
+            settingsService: widget.settingsService,
+          ),
+          icon: Badge.count(
+            count: unread,
+            isLabelVisible: unread > 0,
+            child: const Icon(Icons.notifications_outlined),
           ),
         );
       },
@@ -987,6 +1523,7 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
         ],
       ),
       actions: [
+        _buildNotificationsActionButton(),
         IconButton(
           tooltip: 'Actualizar cursos',
           onPressed: _isScanning ? null : _scanAula,
@@ -1000,6 +1537,130 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
         ),
         _buildSettingsActionButton(),
       ],
+    );
+  }
+
+  Widget _buildDeadlinesRadarBanner(
+    BuildContext context,
+    List<MoodleCourse> visibleCourses,
+  ) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    final q = MoodleCourse.normalizeForMatch(_searchQuery.trim());
+    final allDeadlines = <({MoodleCourse course, MoodleItem item})>[];
+
+    for (final c in visibleCourses) {
+      for (final item in c.items) {
+        if (item.type != 'assignment' && item.type != 'quiz') continue;
+        if (q.isNotEmpty) {
+          final normTitle = MoodleCourse.normalizeForMatch(item.title);
+          final normCourse = MoodleCourse.normalizeForMatch(c.cleanName);
+          if (!normTitle.contains(q) && !normCourse.contains(q)) continue;
+        }
+        allDeadlines.add((course: c, item: item));
+      }
+    }
+
+    final nowSec = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    allDeadlines.sort((a, b) {
+      final ta = a.item.dueTimestamp ?? 0;
+      final tb = b.item.dueTimestamp ?? 0;
+      final aFuture = ta > nowSec;
+      final bFuture = tb > nowSec;
+      if (aFuture != bFuture) return aFuture ? -1 : 1;
+      if (ta > 0 && tb > 0) return ta.compareTo(tb);
+      if (ta > 0) return -1;
+      if (tb > 0) return 1;
+      return a.item.title.compareTo(b.item.title);
+    });
+
+    if (allDeadlines.isEmpty) {
+      return Card(
+        color: cs.surfaceContainerHigh,
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            children: [
+              Icon(Icons.event_available_rounded, color: cs.primary),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  'No se detectaron entregas o cuestionarios en los ramos visibles.',
+                  style: tt.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Card(
+      color: cs.surfaceContainerHigh,
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 14, 14, 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.radar_rounded, color: cs.primary, size: 20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Radar cronológico (${allDeadlines.length})',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: tt.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            for (var i = 0; i < allDeadlines.length && i < 12; i++) ...[
+              if (i > 0) Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.25)),
+              ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                onTap: () => _openItemUrl(allDeadlines[i].item),
+                leading: CircleAvatar(
+                  radius: 17,
+                  backgroundColor: allDeadlines[i].item.isUrgentDeadline
+                      ? cs.errorContainer
+                      : cs.primaryContainer,
+                  foregroundColor: allDeadlines[i].item.isUrgentDeadline
+                      ? cs.onErrorContainer
+                      : cs.onPrimaryContainer,
+                  child: Icon(
+                    allDeadlines[i].item.type == 'quiz'
+                        ? Icons.quiz_outlined
+                        : Icons.assignment_outlined,
+                    size: 17,
+                  ),
+                ),
+                title: Text(
+                  allDeadlines[i].item.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: tt.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+                ),
+                subtitle: Text(
+                  '${allDeadlines[i].course.cleanName}${allDeadlines[i].item.dueText.isNotEmpty ? ' • ${allDeadlines[i].item.dueText}' : ''}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: tt.labelSmall?.copyWith(
+                    color: allDeadlines[i].item.isUrgentDeadline
+                        ? cs.error
+                        : cs.onSurfaceVariant,
+                  ),
+                ),
+                trailing: const Icon(Icons.open_in_new_rounded, size: 16),
+              ),
+            ],
+          ],
+        ),
+      ),
     );
   }
 
@@ -1081,6 +1742,7 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
               ],
             ),
             actions: [
+              _buildNotificationsActionButton(),
               IconButton(
                 tooltip: 'Actualizar cursos',
                 onPressed: _isScanning ? null : _scanAula,
@@ -1110,6 +1772,10 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
                   if (_courses.isNotEmpty) ...[
                     const SizedBox(height: 12),
                     _buildSearchAndFilters(context, queue),
+                  ],
+                  if (_filter == ResourceFilter.deadlines && visibleCourses.isNotEmpty) ...[
+                    const SizedBox(height: 12),
+                    _buildDeadlinesRadarBanner(context, visibleCourses),
                   ],
                   if (_statusMessage != null) ...[
                     const SizedBox(height: 10),
@@ -1446,31 +2112,79 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
             Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.35)),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 6,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  _MetricBadge(
-                    icon: Icons.school_outlined,
-                    label: '${_courses.length} ramos',
-                    bg: cs.surfaceContainerHighest,
-                    fg: cs.onSurface,
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 6,
+                    children: [
+                      _MetricBadge(
+                        icon: Icons.school_outlined,
+                        label: '${_displayCourses.length} ramos',
+                        bg: cs.surfaceContainerHighest,
+                        fg: cs.onSurface,
+                      ),
+                      _MetricBadge(
+                        icon: Icons.insert_drive_file_outlined,
+                        label: '$_totalFilesCount archivos',
+                        bg: cs.secondaryContainer,
+                        fg: cs.onSecondaryContainer,
+                      ),
+                      _MetricBadge(
+                        icon: Icons.download_for_offline_outlined,
+                        label: '$_totalPendingCount pendientes',
+                        bg: _totalPendingCount > 0
+                            ? cs.tertiaryContainer
+                            : cs.surfaceContainerHighest,
+                        fg: _totalPendingCount > 0
+                            ? cs.onTertiaryContainer
+                            : cs.onSurfaceVariant,
+                      ),
+                      if (_urgentDeadlinesCount > 0)
+                        _MetricBadge(
+                          icon: Icons.alarm_on_rounded,
+                          label: '$_urgentDeadlinesCount urgentes (<48h)',
+                          bg: cs.errorContainer,
+                          fg: cs.onErrorContainer,
+                        ),
+                    ],
                   ),
-                  _MetricBadge(
-                    icon: Icons.insert_drive_file_outlined,
-                    label: '$_totalFilesCount archivos',
-                    bg: cs.secondaryContainer,
-                    fg: cs.onSecondaryContainer,
-                  ),
-                  _MetricBadge(
-                    icon: Icons.download_for_offline_outlined,
-                    label: '$_totalPendingCount pendientes',
-                    bg: _totalPendingCount > 0
-                        ? cs.tertiaryContainer
-                        : cs.surfaceContainerHighest,
-                    fg: _totalPendingCount > 0
-                        ? cs.onTertiaryContainer
-                        : cs.onSurfaceVariant,
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 6,
+                    children: [
+                      ActionChip(
+                        visualDensity: VisualDensity.compact,
+                        avatar: const Icon(Icons.sync_rounded, size: 16),
+                        label: const Text('Re-escanear carpeta'),
+                        onPressed: _isScanning ? null : _rescanLocalFiles,
+                      ),
+                      if (_hiddenCoursesCount > 0)
+                        FilterChip(
+                          visualDensity: VisualDensity.compact,
+                          label: Text('Ocultos ($_hiddenCoursesCount)'),
+                          selected: _showHiddenCourses,
+                          onSelected: (v) => setState(() => _showHiddenCourses = v),
+                        ),
+                      if (_isFromCache)
+                        Chip(
+                          visualDensity: VisualDensity.compact,
+                          avatar: const SizedBox(
+                            width: 12,
+                            height: 12,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          ),
+                          label: Text(
+                            _cachedAtSec != null
+                                ? 'Caché (${DateTime.fromMillisecondsSinceEpoch(_cachedAtSec! * 1000).toLocal().toString().substring(11, 16)}) • Actualizando'
+                                : 'Caché local • Actualizando',
+                          ),
+                          side: BorderSide.none,
+                          backgroundColor: cs.primaryContainer.withValues(alpha: 0.6),
+                        ),
+                    ],
                   ),
                 ],
               ),
@@ -1537,31 +2251,93 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
     List<({MoodleCourse course, MoodleItem item})> queue, {
     MoodleCourse? courseOnly,
   }) {
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    const extOptions = ['pdf', 'pptx', 'docx', 'xlsx', 'zip'];
+    final urgentCount = courseOnly != null
+        ? courseOnly.urgentDeadlinesCount
+        : _urgentDeadlinesCount;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        SegmentedButton<ResourceFilter>(
-          showSelectedIcon: false,
-          selected: {_filter},
-          onSelectionChanged: (sel) => setState(() => _filter = sel.first),
-          segments: const [
-            ButtonSegment(
-              value: ResourceFilter.files,
-              icon: Icon(Icons.folder_zip_outlined, size: 17),
-              label: Text('Archivos', maxLines: 1, overflow: TextOverflow.ellipsis),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: SegmentedButton<ResourceFilter>(
+            showSelectedIcon: false,
+            style: SegmentedButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: const EdgeInsets.symmetric(horizontal: 10),
             ),
-            ButtonSegment(
-              value: ResourceFilter.pending,
-              icon: Icon(Icons.new_releases_outlined, size: 17),
-              label: Text('Pendientes', maxLines: 1, overflow: TextOverflow.ellipsis),
-            ),
-            ButtonSegment(
-              value: ResourceFilter.all,
-              icon: Icon(Icons.list_alt_rounded, size: 17),
-              label: Text('Todo', maxLines: 1, overflow: TextOverflow.ellipsis),
-            ),
-          ],
+            selected: {_filter},
+            onSelectionChanged: (sel) => setState(() => _filter = sel.first),
+            segments: [
+              const ButtonSegment(
+                value: ResourceFilter.files,
+                icon: Icon(Icons.folder_zip_outlined, size: 17),
+                label: Text('Archivos'),
+              ),
+              const ButtonSegment(
+                value: ResourceFilter.pending,
+                icon: Icon(Icons.new_releases_outlined, size: 17),
+                label: Text('Pendientes'),
+              ),
+              ButtonSegment(
+                value: ResourceFilter.deadlines,
+                icon: Badge(
+                  isLabelVisible: urgentCount > 0,
+                  label: Text('$urgentCount'),
+                  child: const Icon(Icons.event_available_rounded, size: 17),
+                ),
+                label: const Text('Entregas'),
+              ),
+              const ButtonSegment(
+                value: ResourceFilter.all,
+                icon: Icon(Icons.list_alt_rounded, size: 17),
+                label: Text('Todo'),
+              ),
+            ],
+          ),
         ),
+        if (_filter != ResourceFilter.deadlines) ...[
+          const SizedBox(height: 8),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                if (_extFilter.isNotEmpty) ...[
+                  ActionChip(
+                    visualDensity: VisualDensity.compact,
+                    avatar: const Icon(Icons.filter_alt_off_outlined, size: 15),
+                    label: const Text('Todas'),
+                    onPressed: () => setState(() => _extFilter.clear()),
+                  ),
+                  const SizedBox(width: 6),
+                ],
+                for (final ext in extOptions) ...[
+                  FilterChip(
+                    visualDensity: VisualDensity.compact,
+                    label: Text(
+                      ext.toUpperCase(),
+                      style: tt.labelSmall?.copyWith(fontWeight: FontWeight.w600),
+                    ),
+                    selected: _extFilter.contains(ext),
+                    onSelected: (sel) {
+                      setState(() {
+                        if (sel) {
+                          _extFilter.add(ext);
+                        } else {
+                          _extFilter.remove(ext);
+                        }
+                      });
+                    },
+                  ),
+                  const SizedBox(width: 6),
+                ],
+              ],
+            ),
+          ),
+        ],
         const SizedBox(height: 8),
         Row(
           children: [
@@ -1589,7 +2365,7 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
                         ? () => _toggleCourseSelection(courseOnly, false)
                         : _clearSelection)
                     : null,
-                icon: const Icon(Icons.clear_all_rounded, size: 18),
+                icon: Icon(Icons.clear_all_rounded, size: 18, color: cs.primary),
                 label: const Text(
                   'Limpiar',
                   maxLines: 1,
@@ -1995,6 +2771,7 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
 
     IconData nonFileIcon = switch (item.type) {
       'assignment' => Icons.assignment_outlined,
+      'quiz' => Icons.quiz_outlined,
       'forum' => Icons.forum_outlined,
       'page' => Icons.article_outlined,
       _ => Icons.link_rounded,
@@ -2065,6 +2842,41 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
                                   tt.labelSmall?.copyWith(color: cs.onSurfaceVariant),
                             ),
                           ),
+                        if (item.hasDeadline)
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 8, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: item.isUrgentDeadline
+                                  ? cs.errorContainer
+                                  : cs.primaryContainer.withValues(alpha: 0.7),
+                              borderRadius: BorderRadius.circular(999),
+                            ),
+                            child: Row(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  Icons.schedule_rounded,
+                                  size: 12,
+                                  color: item.isUrgentDeadline
+                                      ? cs.onErrorContainer
+                                      : cs.onPrimaryContainer,
+                                ),
+                                const SizedBox(width: 4),
+                                Text(
+                                  item.dueText.isNotEmpty
+                                      ? item.dueText
+                                      : 'Con entrega',
+                                  style: tt.labelSmall?.copyWith(
+                                    color: item.isUrgentDeadline
+                                        ? cs.onErrorContainer
+                                        : cs.onPrimaryContainer,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                       ],
                     ),
                   ],
@@ -2072,6 +2884,26 @@ class _CoursesScreenState extends State<CoursesScreen> with WidgetsBindingObserv
               ),
             ),
           ),
+          if (item.isDownloaded &&
+              item.localPath != null &&
+              item.localPath!.isNotEmpty) ...[
+            IconButton.filledTonal(
+              tooltip: 'Abrir archivo local',
+              onPressed: () async {
+                final messenger = ScaffoldMessenger.of(context);
+                final ok = await widget.settingsService.openLocalFile(item.localPath!);
+                if (!ok && mounted) {
+                  messenger.showSnackBar(
+                    const SnackBar(
+                      content: Text('No se encontró una app para abrir este archivo o fue movido.'),
+                    ),
+                  );
+                }
+              },
+              icon: const Icon(Icons.file_open_rounded, size: 18),
+            ),
+            const SizedBox(width: 4),
+          ],
           IconButton.filledTonal(
             tooltip: 'Abrir en Aula USM',
             onPressed: () => _openItemUrl(item),

@@ -2,4 +2,6 @@
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <cache-path name="apk_updates" path="updates/" />
     <external-cache-path name="ext_apk_updates" path="updates/" />
+    <external-path name="external_files" path="." />
+    <files-path name="internal_files" path="." />
 </paths>

@@ -131,11 +131,44 @@ class DownloaderService {
 
     await settingsService.saveHistory();
 
+    // Actualizar índice compartido PC <-> Android (.aula-scrapt-index.json)
+    final sharedEntries = <Map<String, dynamic>>[];
+    for (final entry in queue) {
+      final item = entry.item;
+      if (item.isDownloaded && item.localPath != null && item.localPath!.isNotEmpty) {
+        sharedEntries.add({
+          'item_id': item.id,
+          'full_path': item.localPath!,
+          'filename': p.basename(item.localPath!),
+          'title': item.title,
+          'course_id': item.courseId,
+        });
+      }
+    }
+    if (sharedEntries.isNotEmpty) {
+      await settingsService.recordSharedIndexEntries(sharedEntries);
+    }
+
     // Regenerar grafos Markdown (.md) de Obsidian para cada curso descargado
     for (final course in touchedCourses) {
       try {
         await _rebuildCourseGraphMarkdown(downloadRoot, course);
       } catch (_) {}
+    }
+
+    if (downloadedCount > 0 && settingsService.notifyOnDownloadDone) {
+      final firstCourse = touchedCourses.isNotEmpty ? touchedCourses.first.cleanName : '';
+      await settingsService.addNotification(
+        title: 'Descarga completada ($downloadedCount)',
+        body: downloadedCount == 1 && touchedCourses.isNotEmpty
+            ? 'Material guardado en $firstCourse'
+            : '$downloadedCount archivos guardados en tu carpeta local.',
+        kind: 'download',
+        courseName: firstCourse,
+        dedupKey: 'dl_${DateTime.now().millisecondsSinceEpoch ~/ 5000}_$downloadedCount',
+        triggerNative: true,
+        nativeChannelId: 'aula_downloads',
+      );
     }
 
     return DownloadBatchResult(
@@ -302,7 +335,53 @@ class DownloaderService {
       indexSb.writeln();
     }
 
+    if (settingsService.autoExportLinksToObsidian) {
+      final linkItems =
+          course.items.where((i) => i.type == 'link' && i.url.isNotEmpty).toList();
+      if (linkItems.isNotEmpty) {
+        indexSb.writeln('## Enlaces y Clases (URL)');
+        indexSb.writeln();
+        for (final li in linkItems) {
+          indexSb.writeln('- [${li.title}](${li.url}) — *${li.section}*');
+        }
+        indexSb.writeln();
+      }
+    }
+
+    if (settingsService.autoExportForumsToObsidian) {
+      final forumItems =
+          course.items.where((i) => i.type == 'forum' && i.url.isNotEmpty).toList();
+      if (forumItems.isNotEmpty) {
+        indexSb.writeln('## Foros y Anuncios');
+        indexSb.writeln();
+        for (final fi in forumItems) {
+          indexSb.writeln('- [${fi.title}](${fi.url}) — *${fi.section}*');
+        }
+        indexSb.writeln();
+      }
+    }
+
+    final deadlineItems = course.items
+        .where((i) => i.type == 'assignment' || i.type == 'quiz')
+        .toList();
+    if (deadlineItems.isNotEmpty) {
+      indexSb.writeln('## Entregas y Evaluaciones');
+      indexSb.writeln();
+      for (final di in deadlineItems) {
+        final dueSuffix = di.dueText.isNotEmpty ? ' · Cierra: ${di.dueText}' : '';
+        indexSb.writeln(
+          '- [${di.title}](${di.url}) — *${di.typeLabel}* (${di.section})$dueSuffix',
+        );
+      }
+      indexSb.writeln();
+    }
+
     await courseIndexFile.writeAsString(indexSb.toString());
+  }
+
+  /// Exporta o regenera explícitamente los índices Obsidian (.md) de un ramo
+  Future<void> syncCourseObsidianIndex(MoodleCourse course) async {
+    await _rebuildCourseGraphMarkdown(settingsService.downloadRoot, course);
   }
 
   String _slugifyTag(String text) {
